@@ -3,7 +3,10 @@ SleepStudy
 
 #### Overview
 SleepStudy is a fork of [SpectralTrainFig](https://github.com/nsrr/SpectralTrainFig) repo. The original readme from SpectralTrainFig is available [here](https://github.com/PaudelDhirendra/SleepStudy/blob/master/README_SpectralTrainFig.md). SleepStudy is a graphical user interface that allows a user to select a folder of [EDF](http://en.wikipedia.org/wiki/European_Data_Format)/[XML](https://en.wikipedia.org/wiki/XML) files to apply [Spectral Analysis](http://en.wikipedia.org/wiki/Spectral_estimation), [Coherence Analysis](https://en.wikipedia.org/wiki/Coherence_(signal_processing)) and [Sleep Cycle Analysis](https://en.wikipedia.org/wiki/Sleep_cycle) to [electroencephlography signals (EEG)](http://en.wikipedia.org/wiki/Electroencephalography). The program includes a spectral threshold artifact detection scheme described in the [literature](http://www.ncbi.nlm.nih.gov/pubmed/16388912). And a template-subtraction based ECG artifact removal algorithm. SpectralTrainFig is a user friendly approach to the SpectralAnalysisClass function. The GUI versions allows a user to perform spectral or coherence analysis without having to do any programming. EXCEL and PowerPoint summaries are configured by user defined settings and specified spectral bands. Detail epoch by epoch and subject summaries are provided for both NREM and REM states. Additional details are described below. 
-
+#### Required MATLAB Toolbox
+   1. Signal Processing Toolbox.
+   2. Statistics and Machine Learning Toolbox.
+   3. Curve Fitting Toolbox (This is required for ECG decontamination usage).
 #### Getting Started
 The steps involved in setting up spectral analysis, Sleep Cycle Analysis and Coherence Analysis.
 Steps:
@@ -98,3 +101,4 @@ SleepStudy uses several utilities available from the MATLAB file exchange area i
 
 #### Related links
 - [National Sleep Research Resource](https://sleepdata.org/)
+
