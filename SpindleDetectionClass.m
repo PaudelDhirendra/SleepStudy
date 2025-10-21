@@ -14,6 +14,8 @@ classdef SpindleDetectionClass < handle
         numericHypnogram
         stage2Mask
         stage3Mask
+        artifactDetector
+        cleaningSummary
     end
 
     methods
@@ -38,9 +40,26 @@ classdef SpindleDetectionClass < handle
             obj.setupMappedChannels();
             obj.setDefaultParams(params);
             obj.spindleEvents = [];
+
+             obj.artifactDetector = ArtifactDetectionClass();
+            
+            % Set ECG parameters from params if provided
+            if nargin >= 3 && isfield(params, 'ecgName')
+                obj.artifactDetector.setECGParameters(params.ecgName, params.denoiseEcg);
+            end
         end
 
         function runDetection(obj, channels, references, just2)
+
+               fprintf('Starting spindle detection with comprehensive data cleaning...\n');
+            
+            % Perform data cleaning on all channels first
+            [cleanData, artifactInfo] = obj.artifactDetector.fullDataCleaning(...
+                obj.data, obj.channelLabels, obj.fs, obj.numericHypnogram);
+            
+            obj.data = cleanData;
+            obj.cleaningSummary = obj.artifactDetector.getCleaningSummary();
+            
             if nargin < 4
                 just2 = false;
             end

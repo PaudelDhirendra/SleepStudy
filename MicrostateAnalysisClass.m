@@ -12,6 +12,8 @@ classdef MicrostateAnalysisClass < handle
         edfPath
         xmlPath
         mappedChannelNames
+               artifactDetector
+        cleaningSummary
     end
 
     methods
@@ -35,9 +37,23 @@ classdef MicrostateAnalysisClass < handle
             obj.setupMappedChannels();
             obj.setDefaultParams(params);
             obj.microstateResults = [];
+        obj.artifactDetector = ArtifactDetectionClass();
         end
 
         function runAnalysis(obj)
+                fprintf('Starting microstate analysis with comprehensive data cleaning...\n');
+            
+            % Perform comprehensive data cleaning
+            [cleanData, artifactInfo] = obj.artifactDetector.fullDataCleaning(...
+                obj.data, obj.channelLabels, obj.fs, []);
+            
+            % Update data with cleaned version
+            obj.data = cleanData;
+            obj.cleaningSummary = obj.artifactDetector.getCleaningSummary();
+            
+            % Continue with microstate analysis...
+            [dataProc, fsNew] = obj.preprocessData(obj.data, obj.fs);
+            
             if isempty(obj.data)
                 warning('No data to process.');
                 return;
