@@ -53,6 +53,10 @@ classdef ArtifactDetectionClass < handle
             %   fs - sampling rate
             %   numericHypnogram - sleep staging vector
             
+            fprintf('Targeted data cleaning: %d channels (%s)\n', ...
+            length(signalLabels), strjoin(signalLabels, ', '));
+
+
             fprintf('Starting comprehensive data cleaning pipeline...\n');
             
             obj.fs = fs;

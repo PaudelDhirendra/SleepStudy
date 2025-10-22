@@ -50,31 +50,70 @@ classdef MicrostateAnalysisClass < handle
         end
 
         function runAnalysis(obj)
-            fprintf('Starting microstate analysis with comprehensive data cleaning...\n');
+    fprintf('Starting microstate analysis with targeted data cleaning...\n');
 
-            % Configure artifact detector with ALL original channels for ECG detection
-            obj.artifactDetector.fs = obj.fs;
-            obj.artifactDetector.channelLabels = obj.allChannelLabels;
-            
-            % Perform comprehensive data cleaning on ALL channels first
-            [cleanData, artifactInfo] = obj.artifactDetector.fullDataCleaning(...
-                obj.allChannelData, obj.allChannelLabels, obj.fs, []);
-            
-            % Now select only the microstate channels from the cleaned data
-            obj.selectMicrostateChannelsFromCleanedData(cleanData);
-            
-            obj.cleaningSummary = obj.artifactDetector.getCleaningSummary();
-            
-            % Check if we have data after cleaning and channel selection
-            if isempty(obj.data)
-                warning('No data to process after cleaning and channel selection.');
-                return;
-            end
+    % Configure artifact detector
+    obj.artifactDetector.fs = obj.fs;
+    
+    % Identify microstate channels from ALL available channels
+    targetChannels = obj.microstateParams.preferredChannels;
+    microstateIndices = [];
+    microstateLabels = {};
+    
+    for i = 1:length(targetChannels)
+        idx = find(strcmp(obj.allChannelLabels, targetChannels{i}));
+        if ~isempty(idx)
+            microstateIndices(end+1) = idx(1);
+            microstateLabels{end+1} = targetChannels{i};
+        end
+    end
+    
+    if isempty(microstateIndices)
+        error('No suitable EEG channels found for microstate analysis.');
+    end
+    
+    fprintf('Targeted cleaning for %d microstate channels: %s\n', ...
+        length(microstateIndices), strjoin(microstateLabels, ', '));
+    
+    % Add ECG channel if decontamination is enabled
+    cleaningChannels = microstateIndices;
+    cleaningLabels = microstateLabels;
+    
+    if obj.artifactDetector.denoiseEcg
+        ecgIdx = obj.artifactDetector.findECGChannel(obj.allChannelLabels);
+        if ~isempty(ecgIdx)
+            cleaningChannels(end+1) = ecgIdx;
+            cleaningLabels{end+1} = obj.allChannelLabels{ecgIdx};
+            fprintf('Including ECG channel for decontamination: %s\n', obj.allChannelLabels{ecgIdx});
+        end
+    end
+    
+    % Extract only the data we need for cleaning
+    dataToClean = cell(1, length(cleaningChannels));
+    for i = 1:length(cleaningChannels)
+        dataToClean{i} = obj.allChannelData{cleaningChannels(i)};
+    end
+    
+    % Perform targeted cleaning
+    [cleanData, artifactInfo] = obj.artifactDetector.fullDataCleaning(...
+        dataToClean, cleaningLabels, obj.fs, []);
+    
+    % Extract only microstate channels from cleaned data (exclude ECG)
+    obj.data = cell(1, length(microstateIndices));
+    for i = 1:length(microstateIndices)
+        obj.data{i} = cleanData{i};
+    end
+    obj.channelLabels = microstateLabels;
+    
+    obj.cleaningSummary = obj.artifactDetector.getCleaningSummary();
+    
+    % Continue with microstate analysis...
+    fprintf('Starting microstate analysis on %d channels...\n', size(obj.data, 1));
+    
+    % Rest of microstate analysis code...
+    [dataProc, fsNew] = obj.preprocessData(obj.data, obj.fs);
+    
 
-            fprintf('Starting microstate analysis on %d channels...\n', size(obj.data, 1));
-            
-            % Preprocess the cleaned and selected data
-            [dataProc, fsNew] = obj.preprocessData(obj.data, obj.fs);
             
             % Calculate GFP and find peaks
             gfp = sqrt(mean(dataProc.^2, 1));

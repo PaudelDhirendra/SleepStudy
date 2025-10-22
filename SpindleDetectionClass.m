@@ -50,61 +50,101 @@ classdef SpindleDetectionClass < handle
         end
 
         function runDetection(obj, channels, references, just2)
-
-               fprintf('Starting spindle detection with comprehensive data cleaning...\n');
-            
-            % Perform data cleaning on all channels first
-            [cleanData, artifactInfo] = obj.artifactDetector.fullDataCleaning(...
-                obj.data, obj.channelLabels, obj.fs, obj.numericHypnogram);
-            
-            obj.data = cleanData;
-            obj.cleaningSummary = obj.artifactDetector.getCleaningSummary();
-            
-            if nargin < 4
-                just2 = false;
-            end
-            if nargin < 3
-                references = {};
-            end
-            if nargin < 2
-                channels = {'C3-M2', 'C4-M1'};
-            end
-            
-            if isempty(obj.data)
-                warning('No data to process.');
-                return;
-            end
-
-            fprintf('Running spindle detection on %d channels...\n', length(channels));
-            allEvents = {};
-            
-            for ch = 1:length(channels)
-                channelName = channels{ch};
-                fprintf('Processing channel: %s\n', channelName);
-                
-                % Find channel index
-                chIdx = find(strcmp(obj.channelLabels, channelName));
-                if isempty(chIdx)
-                    fprintf('Channel %s not found. Available: %s\n', channelName, strjoin(obj.channelLabels, ', '));
-                    continue;
-                end
-                
-                x = obj.data{chIdx}; % Use cell array access
-                events = obj.detectSpindlesOnChannel(x, channelName, just2);
-                if ~isempty(events)
-                    events = [events, repmat(chIdx, size(events,1), 1)];
-                    allEvents{end+1} = events;
-                end
-            end
-
-            if ~isempty(allEvents)
-                obj.spindleEvents = vertcat(allEvents{:});
-                fprintf('Total spindles detected: %d\n', size(obj.spindleEvents,1));
-            else
-                obj.spindleEvents = [];
-                fprintf('No spindles detected in any channel\n');
-            end
+    fprintf('Starting spindle detection with targeted data cleaning...\n');
+    
+    % Identify which channels we actually need to clean
+    eegChannelIndices = [];
+    eegChannelNames = {};
+    
+    for ch = 1:length(channels)
+        channelName = channels{ch};
+        chIdx = find(strcmp(obj.channelLabels, channelName));
+        if ~isempty(chIdx)
+            eegChannelIndices(end+1) = chIdx;
+            eegChannelNames{end+1} = channelName;
         end
+    end
+    
+    if isempty(eegChannelIndices)
+        warning('No specified channels found for cleaning');
+        return;
+    end
+    
+    fprintf('Targeted cleaning for %d EEG channels: %s\n', ...
+        length(eegChannelIndices), strjoin(eegChannelNames, ', '));
+    
+    % Extract only the EEG channels we need + ECG for decontamination
+    cleaningChannels = eegChannelIndices;
+    cleaningLabels = eegChannelNames;
+    
+    % Add ECG channel if available and decontamination is enabled
+    if obj.artifactDetector.denoiseEcg
+        ecgIdx = obj.artifactDetector.findECGChannel(obj.channelLabels);
+        if ~isempty(ecgIdx)
+            cleaningChannels(end+1) = ecgIdx;
+            cleaningLabels{end+1} = obj.channelLabels{ecgIdx};
+            fprintf('Including ECG channel for decontamination: %s\n', obj.channelLabels{ecgIdx});
+        end
+    end
+    
+    % Extract only the data we need for cleaning
+    dataToClean = cell(1, length(cleaningChannels));
+    labelsToClean = cell(1, length(cleaningChannels));
+    for i = 1:length(cleaningChannels)
+        dataToClean{i} = obj.data{cleaningChannels(i)};
+        labelsToClean{i} = cleaningLabels{i};
+    end
+    
+    % Perform targeted cleaning only on required channels
+    [cleanData, artifactInfo] = obj.artifactDetector.fullDataCleaning(...
+        dataToClean, labelsToClean, obj.fs, obj.numericHypnogram);
+    
+    % Update only the EEG channels in the main data (keep ECG as original if present)
+    for i = 1:length(eegChannelIndices)
+        obj.data{eegChannelIndices(i)} = cleanData{i};
+    end
+    
+    obj.cleaningSummary = obj.artifactDetector.getCleaningSummary();
+    
+    % Continue with spindle detection as before...
+    if nargin < 4
+        just2 = false;
+    end
+    if nargin < 3
+        references = {};
+    end
+    
+    % Rest of the spindle detection code...
+    fprintf('Running spindle detection on %d channels...\n', length(channels));
+    allEvents = {};
+    
+    for ch = 1:length(channels)
+        channelName = channels{ch};
+        fprintf('Processing channel: %s\n', channelName);
+        
+        % Find channel index
+        chIdx = find(strcmp(obj.channelLabels, channelName));
+        if isempty(chIdx)
+            fprintf('Channel %s not found. Available: %s\n', channelName, strjoin(obj.channelLabels, ', '));
+            continue;
+        end
+        
+        x = obj.data{chIdx};
+        events = obj.detectSpindlesOnChannel(x, channelName, just2);
+        if ~isempty(events)
+            events = [events, repmat(chIdx, size(events,1), 1)];
+            allEvents{end+1} = events;
+        end
+    end
+    
+    if ~isempty(allEvents)
+        obj.spindleEvents = vertcat(allEvents{:});
+        fprintf('Total spindles detected: %d\n', size(obj.spindleEvents,1));
+    else
+        obj.spindleEvents = [];
+        fprintf('No spindles detected in any channel\n');
+    end
+end
 
   function saveResults(obj, outputFile)
     if isempty(obj.spindleEvents)
