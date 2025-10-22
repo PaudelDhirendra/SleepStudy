@@ -84,7 +84,7 @@ classdef ArtifactDetectionClass < handle
             artifactInfo.ecgContaminationScore = obj.ecgContaminationScore;
         end
         
-        function cleanData = ecgDecontamination(obj, data, signalLabels, fs)
+    function cleanData = ecgDecontamination(obj, data, signalLabels, fs)
     % ECG decontamination using same method as SpectralTrainClass
     fprintf('Performing ECG decontamination...\n');
     
@@ -98,6 +98,24 @@ classdef ArtifactDetectionClass < handle
     end
     
     fprintf('Using ECG channel: %s (index %d)\n', signalLabels{ecgChannel}, ecgChannel);
+
+
+    % === ADDED: ECG QUALITY CHECK ===
+    % Extract ECG signal for quality check
+    if iscell(data)
+        ecgSignalForCheck = data{ecgChannel};
+    else
+        ecgSignalForCheck = data(ecgChannel, :);
+    end
+    
+    % Check ECG quality before proceeding
+    if ~obj.checkECGQuality(ecgSignalForCheck, fs)
+        fprintf('ECG quality check failed - skipping decontamination\n');
+        obj.ecgDecontaminationApplied = false;
+        cleanData = data;
+        return;
+    end
+    % === END OF QUALITY CHECK ===
     
     % Handle both cell array and matrix formats consistently
     isCellData = iscell(data);
@@ -575,6 +593,56 @@ end
             end
             
             summary.cleanDataPercentage = 100 - summary.artifactPercentage;
+        end
+    end
+        methods (Access = private)
+        function isGoodQuality = checkECGQuality(obj, ecgSignal, fs)
+            % Check ECG signal quality before decontamination
+            if isempty(ecgSignal) || length(ecgSignal) < fs
+                fprintf('ECG signal too short or empty - skipping decontamination\n');
+                isGoodQuality = false;
+                return;
+            end
+            
+            % Check for flat lines
+            if std(ecgSignal) < 0.001
+                fprintf('ECG signal appears flat (std=%.6f) - skipping decontamination\n', std(ecgSignal));
+                isGoodQuality = false;
+                return;
+            end
+            
+            % Check for excessive noise using Median Absolute Deviation
+            try
+                signalMAD = mad(ecgSignal, 1);
+                diffMAD = mad(diff(ecgSignal), 1);
+                if diffMAD > 0
+                    noiseLevel = signalMAD / diffMAD;
+                    if noiseLevel > 10
+                        fprintf('ECG signal too noisy (noise level: %.2f) - skipping decontamination\n', noiseLevel);
+                        isGoodQuality = false;
+                        return;
+                    end
+                end
+            catch
+                % If MAD calculation fails, use standard deviation
+                noiseLevel = std(ecgSignal) / std(diff(ecgSignal));
+                if noiseLevel > 10
+                    fprintf('ECG signal too noisy (noise level: %.2f) - skipping decontamination\n', noiseLevel);
+                    isGoodQuality = false;
+                    return;
+                end
+            end
+            
+            % Additional check: signal range
+            signalRange = range(ecgSignal);
+            if signalRange < 0.1
+                fprintf('ECG signal range too small (%.4f) - skipping decontamination\n', signalRange);
+                isGoodQuality = false;
+                return;
+            end
+            
+            fprintf('ECG signal quality check passed\n');
+            isGoodQuality = true;
         end
     end
 end
