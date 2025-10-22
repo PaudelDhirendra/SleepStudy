@@ -51,9 +51,12 @@ handles.output = hObject;
 % Set defaults
 set(handles.e_description_analysis_description, 'String','Spindle Microstate Analysis');
 set(handles.e_prefix, 'String', 'study__');
-set(handles.e_spindle_channel, 'String', '{''C3-M2''}');
-set(handles.e_microstate_channels, 'String', '{''F3-M2'',''F4-M1'',''C3-M2'',''C4-M1'',''O1-M2'',''O2-M1''}');
-set(handles.e_ecg_channels, 'String', '{''ECG'',''EKG'',''ECG1'',''EKG1''}');
+
+% AUTO-SELECT: These will be populated when files are processed
+set(handles.e_spindle_channel, 'String', '{''Auto-Select''}');
+set(handles.e_microstate_channels, 'String', '{''Auto-Select''}');
+set(handles.e_ecg_channels, 'String', '{''Auto-Select''}');
+
 set(handles.e_description_xml_suffix, 'String','.edf.xml');
 
 % Set defaults for artifact detection controls
@@ -301,8 +304,131 @@ function checkbox4_Callback(hObject, eventdata, handles)
 % =========================================================================
 % CUSTOM FUNCTIONS
 % =========================================================================
+function [spindleChannels, microstateChannels, ecgChannels] = detectAvailableChannels(edfPath)
+    % Detect available channels from EDF file for auto-selection
+    fprintf('Auto-detecting channels from: %s\n', edfPath);
+    
+    try
+        % Load EDF file temporarily to detect channels
+        tempLoader = BlockEdfLoadClass(edfPath);
+        tempLoader.numCompToLoad = 3;
+        tempLoader.SWAP_MIN_MAX = 1;
+        tempLoader = tempLoader.blockEdfLoad;
+        
+        rawChannelNames = tempLoader.signal_labels;
+        mappedNames = ChannelMappingHelper(rawChannelNames);
+        
+        fprintf('Available channels: %s\n', strjoin(mappedNames, ', '));
+        
+        % Detect spindle channels (prefer C3-M2, C4-M1)
+        spindleChannels = detectSpindleChannels(mappedNames);
+        
+        % Detect microstate channels (standard 6 bipolar)
+        microstateChannels = detectMicrostateChannels(mappedNames);
+        
+        % Detect ECG channels
+        ecgChannels = detectECGChannels(mappedNames);
+        
+        fprintf('Auto-detected:\n');
+        fprintf('  Spindle channels: %s\n', strjoin(spindleChannels, ', '));
+        fprintf('  Microstate channels: %s\n', strjoin(microstateChannels, ', '));
+        fprintf('  ECG channels: %s\n', strjoin(ecgChannels, ', '));
+        
+    catch ME
+        fprintf('Error auto-detecting channels: %s\n', ME.message);
+        % Fallback to defaults
+        spindleChannels = {'C3-M2'};
+        microstateChannels = {'F3-M2', 'F4-M1', 'C3-M2', 'C4-M1', 'O1-M2', 'O2-M1'};
+        ecgChannels = {'ECG', 'EKG'};
+    end
 
-function runAnalysis(handles, mode)
+
+function spindleChannels = detectSpindleChannels(channelNames)
+    % Prefer C3-M2, C4-M1 for spindle detection
+    preferredSpindle = {'C3-M2', 'C4-M1'};
+    spindleChannels = {};
+    
+    for i = 1:length(preferredSpindle)
+        if any(strcmp(channelNames, preferredSpindle{i}))
+            spindleChannels{end+1} = preferredSpindle{i};
+        end
+    end
+    
+    % Fallback: any C3 or C4 channels
+    if isempty(spindleChannels)
+        for i = 1:length(channelNames)
+            if contains(upper(channelNames{i}), 'C3') || contains(upper(channelNames{i}), 'C4')
+                spindleChannels{end+1} = channelNames{i};
+            end
+        end
+    end
+    
+    % Final fallback: use first available EEG channel
+    if isempty(spindleChannels) && ~isempty(channelNames)
+        spindleChannels = {channelNames{1}};
+    end
+
+
+function microstateChannels = detectMicrostateChannels(channelNames)
+    % Standard 6 bipolar channels for microstate analysis
+    standardMicrostate = {'F3-M2', 'F4-M1', 'C3-M2', 'C4-M1', 'O1-M2', 'O2-M1'};
+    microstateChannels = {};
+    
+    for i = 1:length(standardMicrostate)
+        if any(strcmp(channelNames, standardMicrostate{i}))
+            microstateChannels{end+1} = standardMicrostate{i};
+        end
+    end
+    
+    % Fallback: look for individual electrode names
+    if length(microstateChannels) < 4
+        eegElectrodes = {'F3', 'F4', 'C3', 'C4', 'O1', 'O2', 'FZ', 'CZ', 'PZ', 'FP1', 'FP2'};
+        foundChannels = {};
+        
+        for i = 1:length(channelNames)
+            for j = 1:length(eegElectrodes)
+                if contains(upper(channelNames{i}), upper(eegElectrodes{j}))
+                    foundChannels{end+1} = channelNames{i};
+                    break;
+                end
+            end
+        end
+        
+        % Use up to 6 EEG channels
+        if length(foundChannels) > 6
+            microstateChannels = foundChannels(1:6);
+        else
+            microstateChannels = foundChannels;
+        end
+    end
+
+
+function ecgChannels = detectECGChannels(channelNames)
+    % Common ECG channel patterns
+    ecgPatterns = {'ECG', 'EKG', 'ELECTROCARDIO', 'ELECTRO-CARDIO', 'RIP ECG', 'ECG II', 'ECG1', 'EKG1', 'ECG2', 'EKG2'};
+    ecgChannels = {};
+    
+    for i = 1:length(channelNames)
+        currentLabel = upper(channelNames{i});
+        for j = 1:length(ecgPatterns)
+            if contains(currentLabel, ecgPatterns{j})
+                ecgChannels{end+1} = channelNames{i};
+                break;
+            end
+        end
+    end
+    
+    % Fallback: look for any channel containing "ECG" or "EKG"
+    if isempty(ecgChannels)
+        for i = 1:length(channelNames)
+            if contains(upper(channelNames{i}), 'ECG') || contains(upper(channelNames{i}), 'EKG')
+                ecgChannels{end+1} = channelNames{i};
+            end
+        end
+    end
+
+
+    function runAnalysis(handles, mode)
     dataDir = get(handles.e_data_folder, 'String');
     resultDir = get(handles.e_result_folder, 'String');
     prefix = get(handles.e_prefix, 'String');
@@ -310,7 +436,6 @@ function runAnalysis(handles, mode)
 
     % Get the parameters from GUI
     denoiseEcg = logical(get(handles.cb_ecg_decontamination, 'Value'));
-    ecgChannels = eval(get(handles.e_ecg_channels, 'String'));
     enableArtifactDetection = logical(get(handles.cb_artifact_detection, 'Value'));
     
     % Get thresholds from two separate boxes
@@ -324,21 +449,11 @@ function runAnalysis(handles, mode)
         artifactThresholds = [2.5, 2.0];
     end
     
-    % Create parameters structure
-    analysisParams = struct();
-    analysisParams.denoiseEcg = denoiseEcg;
-    analysisParams.ecgName = ecgChannels;
-    analysisParams.enableArtifactDetection = enableArtifactDetection;
-    analysisParams.artifactThreshold = artifactThresholds;
-    
     fprintf('\n=== STARTING ANALYSIS ===\n');
     fprintf('Data directory: %s\n', dataDir);
     fprintf('Result directory: %s\n', resultDir);
     fprintf('Mode: %s\n', mode);
     fprintf('XML suffix: %s\n', xmlSuffix);
-    fprintf('ECG decontamination: %s\n', string(denoiseEcg));
-    fprintf('Artifact detection: %s\n', string(enableArtifactDetection));
-    fprintf('Artifact thresholds - Delta: %.1f, Beta: %.1f\n', deltaTh, betaTh);
     
     % Create temporary file list
     tempFileList = fullfile(resultDir, 'temp_file_list.xlsx');
@@ -466,6 +581,26 @@ function runAnalysis(handles, mode)
             end
             fprintf('Found matching XML: %s\n', xmlPath);
 
+            % AUTO-DETECT CHANNELS for this file
+            [autoSpindleChannels, autoMicrostateChannels, autoEcgChannels] = detectAvailableChannels(edfPath);
+            
+            % Update GUI with detected channels (for display only)
+            if k == 1 % Only update GUI once with first file's channels
+                set(handles.e_spindle_channel, 'String', ['{', sprintf('''%s'',', autoSpindleChannels{1:end-1}), '''', autoSpindleChannels{end}, '''}']);
+                set(handles.e_microstate_channels, 'String', ['{', sprintf('''%s'',', autoMicrostateChannels{1:end-1}), '''', autoMicrostateChannels{end}, '''}']);
+                set(handles.e_ecg_channels, 'String', ['{', sprintf('''%s'',', autoEcgChannels{1:end-1}), '''', autoEcgChannels{end}, '''}']);
+                guidata(handles.figure1, handles);
+            end
+            
+            % Create parameters structure with auto-detected channels
+            analysisParams = struct();
+            analysisParams.denoiseEcg = denoiseEcg;
+            analysisParams.ecgName = autoEcgChannels;
+            analysisParams.enableArtifactDetection = enableArtifactDetection;
+            analysisParams.artifactThreshold = artifactThresholds;
+            analysisParams.autoSpindleChannels = autoSpindleChannels;
+            analysisParams.autoMicrostateChannels = autoMicrostateChannels;
+            
             % Create subject-specific prefix
             if useFileListMethod
                 [~, edfNameClean, ~] = fileparts(edfName);
@@ -481,9 +616,9 @@ function runAnalysis(handles, mode)
             
             processedFiles = processedFiles + 1;
 
-            % Spindle Detection
+            % Spindle Detection with auto-detected channels
             if any(strcmp(mode, {'spindle','both'}))
-                fprintf('Starting spindle detection...\n');
+                fprintf('Starting spindle detection with auto-selected channels: %s\n', strjoin(autoSpindleChannels, ', '));
                 try
                     % Create parameters structure for spindle detection
                     spindleParams = struct();
@@ -509,9 +644,8 @@ function runAnalysis(handles, mode)
                     % Create spindle detection object
                     spindleObj = SpindleDetectionClass(edfPath, xmlPath, spindleParams);
                     
-                    % Run detection on specific channels
-                    channels = {'C3-M2', 'C4-M1'};
-                    spindleObj.runDetection(channels);
+                    % Run detection on auto-detected channels
+                    spindleObj.runDetection(autoSpindleChannels);
                     
                     % Save results
                     if ~isempty(spindleObj.spindleEvents)
@@ -533,9 +667,9 @@ function runAnalysis(handles, mode)
                 end
             end
 
-            % Microstate Analysis
+            % Microstate Analysis with auto-detected channels
             if any(strcmp(mode, {'microstate','both'}))
-                fprintf('Starting microstate analysis...\n');
+                fprintf('Starting microstate analysis with auto-selected channels: %s\n', strjoin(autoMicrostateChannels, ', '));
                 try
                     % Get the SELECTED microstate classes
                     classStrings = get(handles.pm_microstate_classes, 'String');
@@ -551,6 +685,7 @@ function runAnalysis(handles, mode)
                     microstateParams.ecgName = analysisParams.ecgName;
                     microstateParams.enableArtifactDetection = analysisParams.enableArtifactDetection;
                     microstateParams.artifactThreshold = analysisParams.artifactThreshold;
+                    microstateParams.preferredChannels = autoMicrostateChannels; % Pass auto-detected channels
                     
                     % Create microstate analysis object
                     microObj = MicrostateAnalysisClass(edfPath, microstateParams);

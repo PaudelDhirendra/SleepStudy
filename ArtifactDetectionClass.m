@@ -81,114 +81,258 @@ classdef ArtifactDetectionClass < handle
         end
         
         function cleanData = ecgDecontamination(obj, data, signalLabels, fs)
-            % ECG decontamination using same method as SpectralTrainClass
-            fprintf('Performing ECG decontamination...\n');
+    % ECG decontamination using same method as SpectralTrainClass
+    fprintf('Performing ECG decontamination...\n');
+    
+    % Find ECG channel
+    ecgChannel = obj.findECGChannel(signalLabels);
+    if isempty(ecgChannel)
+        warning('No ECG channel found for decontamination. Available channels: %s', strjoin(signalLabels, ', '));
+        obj.ecgDecontaminationApplied = false;
+        cleanData = data;
+        return;
+    end
+    
+    fprintf('Using ECG channel: %s (index %d)\n', signalLabels{ecgChannel}, ecgChannel);
+    
+    % Handle both cell array and matrix formats consistently
+    isCellData = iscell(data);
+    
+    try
+        if isCellData
+            % Data is cell array - handle different sampling rates properly
+            ecgSignal = data{ecgChannel};
+            ecgLength = length(ecgSignal);
             
-            % Find ECG channel
-            ecgChannel = obj.findECGChannel(signalLabels);
-            if isempty(ecgChannel)
-                warning('No ECG channel found for decontamination. Available channels: %s', strjoin(signalLabels, ', '));
-                obj.ecgDecontaminationApplied = false;
-                cleanData = data;
-                return;
-            end
+            fprintf('ECG signal length: %d samples\n', ecgLength);
             
-            fprintf('Using ECG channel: %s (index %d)\n', signalLabels{ecgChannel}, ecgChannel);
+            % Prepare EEG signals for decontamination
+            eegSignals = {};
+            eegLabels = {};
+            eegIndices = [];
             
-            % Extract ECG signal
-            if iscell(data)
-                ecgSignal = data{ecgChannel};
-                eegSignals = data;
-                eegSignals(ecgChannel) = []; % Remove ECG from EEG signals
-                eegLabels = signalLabels;
-                eegLabels(ecgChannel) = [];
-            else
-                ecgSignal = data(ecgChannel, :);
-                eegSignals = data(setdiff(1:size(data,1), ecgChannel), :);
-                eegLabels = signalLabels(setdiff(1:length(signalLabels), ecgChannel));
-            end
-            
-            try
-                % Use the same ecgDecont function as in SpectralTrainClass
-                if iscell(eegSignals)
-                    cleanEEG = ecgDecont(eegSignals, fs, ecgSignal, fs, eegLabels);
+            for i = 1:length(data)
+                if i == ecgChannel
+                    continue; % Skip ECG channel
+                end
+                
+                eegSignal = data{i};
+                eegLength = length(eegSignal);
+                
+                fprintf('EEG channel %d (%s) length: %d samples\n', i, signalLabels{i}, eegLength);
+                
+                if eegLength == ecgLength
+                    % Same length - use as is
+                    eegSignals{end+1} = eegSignal;
+                    eegLabels{end+1} = signalLabels{i};
+                    eegIndices(end+1) = i;
                 else
-                    % Convert matrix to cell array for ecgDecont
-                    eegCell = cell(1, size(eegSignals, 1));
-                    for i = 1:size(eegSignals, 1)
-                        eegCell{i} = eegSignals(i, :);
-                    end
-                    cleanEEG = ecgDecont(eegCell, fs, ecgSignal, fs, eegLabels);
+                    % Different lengths - need resampling
+                    fprintf('  Resampling EEG channel %d from %d to %d samples\n', i, eegLength, ecgLength);
                     
-                    % Convert back to matrix if input was matrix
-                    if ~iscell(data)
-                        cleanEEG = cell2mat(cleanEEG');
+                    if eegLength > ecgLength
+                        % EEG has higher sampling rate - downsample
+                        ratio = eegLength / ecgLength;
+                        if abs(ratio - 2) < 0.1
+                            % Common case: 2:1 ratio - simple decimation
+                            eegResampled = decimate(eegSignal, 2);
+                        else
+                            % General case - use resample
+                            eegResampled = resample(eegSignal, 1, round(ratio));
+                        end
+                    else
+                        % EEG has lower sampling rate - upsample
+                        ratio = ecgLength / eegLength;
+                        if abs(ratio - 2) < 0.1
+                            % Common case: 1:2 ratio - simple interpolation
+                            eegResampled = interp(eegSignal, 2);
+                        else
+                            % General case - use resample
+                            eegResampled = resample(eegSignal, round(ratio), 1);
+                        end
                     end
+                    
+                    % Ensure final length matches ECG
+                    if length(eegResampled) > ecgLength
+                        eegResampled = eegResampled(1:ecgLength);
+                    elseif length(eegResampled) < ecgLength
+                        eegResampled(end+1:ecgLength) = 0;
+                    end
+                    
+                    eegSignals{end+1} = eegResampled;
+                    eegLabels{end+1} = signalLabels{i};
+                    eegIndices(end+1) = i;
                 end
-                
-                % Reconstruct data with cleaned EEG and original ECG
-                if iscell(data)
-                    cleanData = cleanEEG;
-                    % Add ECG channel back if needed
-                    % cleanData{end+1} = ecgSignal;
-                else
-                    cleanData = zeros(size(data));
-                    cleanData(setdiff(1:size(data,1), ecgChannel), :) = cleanEEG;
-                    cleanData(ecgChannel, :) = ecgSignal; % Keep original ECG
-                end
-                
-                obj.ecgDecontaminationApplied = true;
-                obj.estimateECGContamination(data, cleanData);
-                
-                fprintf('ECG decontamination completed successfully\n');
-                
-            catch ME
-                warning('ECG decontamination failed: %s. Using original data.', ME.message);
-                cleanData = data;
-                obj.ecgDecontaminationApplied = false;
+            end
+            
+            if isempty(eegSignals)
+                error('No valid EEG signals found for decontamination');
+            end
+            
+            fprintf('Using %d EEG channels for ECG decontamination\n', length(eegSignals));
+            
+        else
+            % Data is matrix - all channels should have same length
+            ecgSignal = data(ecgChannel, :);
+            eegSignals = cell(1, size(data, 1)-1);
+            eegLabels = cell(1, size(data, 1)-1);
+            
+            nonEcgIdx = setdiff(1:size(data,1), ecgChannel);
+            for i = 1:length(nonEcgIdx)
+                eegSignals{i} = data(nonEcgIdx(i), :);
+                eegLabels{i} = signalLabels{nonEcgIdx(i)};
             end
         end
         
-        function ecgChannel = findECGChannel(obj, signalLabels)
-            % Find ECG channel using flexible matching (same as SpectralTrainClass)
-            ecgChannel = [];
+        % Additional safety check
+        if isempty(eegSignals)
+            error('No EEG signals available for decontamination');
+        end
+        
+        % Verify all signals now have consistent lengths
+        refLength = length(ecgSignal);
+        for i = 1:length(eegSignals)
+            if length(eegSignals{i}) ~= refLength
+                error('Signal length mismatch after resampling: channel %d has %d samples, expected %d', ...
+                    i, length(eegSignals{i}), refLength);
+            end
+        end
+        
+        % Use the same ecgDecont function as in SpectralTrainClass
+        fprintf('Calling ecgDecont function with %d EEG channels...\n', length(eegSignals));
+        cleanEEG = ecgDecont(eegSignals, fs, ecgSignal, fs, eegLabels);
+        
+        % Validate cleaned EEG data
+        if isempty(cleanEEG)
+            error('ecgDecont returned empty results');
+        end
+        
+        % Reconstruct data with cleaned EEG
+        if isCellData
+            % For cell array format, create new cell array with cleaned data
+            cleanData = cell(1, length(data));
             
-            for i = 1:length(signalLabels)
-                currentLabel = upper(signalLabels{i});
-                
-                % Exact matches
-                if any(strcmpi(signalLabels{i}, obj.ecgName))
-                    ecgChannel = i;
-                    break;
-                end
-                
-                % Partial matches
-                for j = 1:length(obj.ecgName)
-                    if contains(currentLabel, upper(obj.ecgName{j}))
-                        ecgChannel = i;
-                        break;
-                    end
-                end
-                
-                if ~isempty(ecgChannel)
-                    break;
+            % Put cleaned EEG channels back in their original positions
+            for i = 1:length(eegIndices)
+                origIdx = eegIndices(i);
+                if i <= length(cleanEEG)
+                    cleanData{origIdx} = cleanEEG{i};
+                else
+                    cleanData{origIdx} = data{origIdx}; % Fallback to original
                 end
             end
             
-            % If no match found, try common variations
-            if isempty(ecgChannel)
-                ecgPatterns = {'ECG', 'EKG', 'ELECTROCARDIO', 'ELECTRO-CARDIO'};
-                for i = 1:length(signalLabels)
-                    currentLabel = upper(signalLabels{i});
-                    for j = 1:length(ecgPatterns)
-                        if contains(currentLabel, ecgPatterns{j})
-                            ecgChannel = i;
-                            fprintf('Found potential ECG channel: %s\n', signalLabels{i});
-                            break;
-                        end
+            % Keep ECG channel as original
+            cleanData{ecgChannel} = ecgSignal;
+            
+            % Fill any remaining channels with original data
+            for i = 1:length(data)
+                if isempty(cleanData{i})
+                    cleanData{i} = data{i};
+                end
+            end
+            
+        else
+            % Convert back to matrix format
+            cleanData = zeros(size(data));
+            cleanData(ecgChannel, :) = ecgSignal; % Keep original ECG
+            
+            % Place cleaned EEG data in their original positions
+            nonEcgIdx = setdiff(1:size(data,1), ecgChannel);
+            for i = 1:length(nonEcgIdx)
+                if i <= length(cleanEEG) && length(cleanEEG{i}) == size(cleanData, 2)
+                    cleanData(nonEcgIdx(i), :) = cleanEEG{i};
+                else
+                    fprintf('Warning: Cleaned EEG channel %d length mismatch. Using original data.\n', i);
+                    cleanData(nonEcgIdx(i), :) = data(nonEcgIdx(i), :);
+                end
+            end
+        end
+        
+        obj.ecgDecontaminationApplied = true;
+        obj.estimateECGContamination(data, cleanData);
+        
+        fprintf('ECG decontamination completed successfully\n');
+        
+    catch ME
+        warning('ECG decontamination failed: %s. Using original data.', ME.message);
+        fprintf('Error details:\n');
+        fprintf('  Data type: %s\n', class(data));
+        if isCellData
+            fprintf('  Number of channels: %d\n', length(data));
+            if ~isempty(data)
+                fprintf('  ECG channel length: %d\n', length(data{ecgChannel}));
+            end
+        else
+            fprintf('  Data dimensions: %s\n', mat2str(size(data)));
+        end
+        cleanData = data;
+        obj.ecgDecontaminationApplied = false;
+    end
+end
+
+
+
+        function ecgChannel = findECGChannel(obj, signalLabels)
+            % Find ECG channel using flexible matching
+            ecgChannel = [];
+            
+            if isempty(signalLabels)
+                return;
+            end
+            
+            % First pass: exact matches
+            for i = 1:length(signalLabels)
+                if isempty(signalLabels{i})
+                    continue;
+                end
+                
+                currentLabel = upper(strtrim(signalLabels{i}));
+                
+                % Exact matches with common ECG patterns
+                ecgPatterns = {'ECG', 'EKG', 'ECG1', 'EKG1', 'ECG2', 'EKG2', 'ELECTROCARDIO'};
+                for j = 1:length(ecgPatterns)
+                    if strcmp(currentLabel, upper(ecgPatterns{j})) || ...
+                       contains(currentLabel, upper(ecgPatterns{j}))
+                        ecgChannel = i;
+                        fprintf('Found ECG channel: %s (index %d)\n', signalLabels{i}, i);
+                        return;
                     end
-                    if ~isempty(ecgChannel)
-                        break;
+                end
+            end
+            
+            % Second pass: partial matches
+            if isempty(ecgChannel)
+                for i = 1:length(signalLabels)
+                    if isempty(signalLabels{i})
+                        continue;
+                    end
+                    
+                    currentLabel = upper(strtrim(signalLabels{i}));
+                    
+                    % Look for ECG in various formats
+                    if contains(currentLabel, 'ECG') || contains(currentLabel, 'EKG')
+                        ecgChannel = i;
+                        fprintf('Found potential ECG channel: %s (index %d)\n', signalLabels{i}, i);
+                        return;
+                    end
+                end
+            end
+            
+            % Final attempt: check if any channel name matches the configured ECG names
+            if isempty(ecgChannel) && ~isempty(obj.ecgName)
+                for i = 1:length(signalLabels)
+                    if isempty(signalLabels{i})
+                        continue;
+                    end
+                    
+                    currentLabel = upper(strtrim(signalLabels{i}));
+                    for j = 1:length(obj.ecgName)
+                        if contains(currentLabel, upper(obj.ecgName{j}))
+                            ecgChannel = i;
+                            fprintf('Found ECG channel via config: %s (index %d)\n', signalLabels{i}, i);
+                            return;
+                        end
                     end
                 end
             end
@@ -198,12 +342,49 @@ classdef ArtifactDetectionClass < handle
             % Estimate ECG contamination level by comparing original and cleaned data
             try
                 if iscell(originalData) && iscell(cleanedData)
-                    % Use first channel for estimation
-                    orig = originalData{1};
-                    clean = cleanedData{1};
+                    % Use first channel for estimation if available
+                    if ~isempty(originalData) && ~isempty(cleanedData) && ...
+                       length(originalData) > 0 && length(cleanedData) > 0
+                        orig = originalData{1};
+                        clean = cleanedData{1};
+                        
+                        % Ensure same length
+                        minLen = min(length(orig), length(clean));
+                        if minLen > 0
+                            orig = orig(1:minLen);
+                            clean = clean(1:minLen);
+                        else
+                            obj.ecgContaminationScore = 0;
+                            return;
+                        end
+                    else
+                        obj.ecgContaminationScore = 0;
+                        return;
+                    end
+                elseif ~iscell(originalData) && ~iscell(cleanedData)
+                    % Matrix format
+                    if size(originalData, 1) > 0 && size(cleanedData, 1) > 0 && ...
+                       size(originalData, 2) > 0 && size(cleanedData, 2) > 0
+                        orig = originalData(1, :);
+                        clean = cleanedData(1, :);
+                        
+                        % Ensure same length
+                        minLen = min(length(orig), length(clean));
+                        if minLen > 0
+                            orig = orig(1:minLen);
+                            clean = clean(1:minLen);
+                        else
+                            obj.ecgContaminationScore = 0;
+                            return;
+                        end
+                    else
+                        obj.ecgContaminationScore = 0;
+                        return;
+                    end
                 else
-                    orig = originalData(1, :);
-                    clean = cleanedData(1, :);
+                    % Mixed formats - cannot compare
+                    obj.ecgContaminationScore = 0;
+                    return;
                 end
                 
                 % Calculate RMS difference (ECG artifact component)
@@ -231,9 +412,19 @@ classdef ArtifactDetectionClass < handle
             
             % Use first channel for artifact detection
             if iscell(data)
+                if isempty(data)
+                    warning('No data available for artifact detection');
+                    artifactInfo = struct();
+                    return;
+                end
                 refChannel = 1;
                 x = data{refChannel};
             else
+                if isempty(data)
+                    warning('No data available for artifact detection');
+                    artifactInfo = struct();
+                    return;
+                end
                 refChannel = 1;
                 x = data(refChannel, :);
             end

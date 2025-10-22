@@ -12,8 +12,12 @@ classdef MicrostateAnalysisClass < handle
         edfPath
         xmlPath
         mappedChannelNames
-               artifactDetector
+        artifactDetector
         cleaningSummary
+        originalData
+        originalChannelLabels
+        allChannelData  % Store all channels including ECG for artifact detection
+        allChannelLabels % Store all channel labels including ECG
     end
 
     methods
@@ -35,32 +39,41 @@ classdef MicrostateAnalysisClass < handle
             end
             
             obj.setupMappedChannels();
+            
+            % Store ALL original data and labels before channel selection
+            obj.allChannelData = obj.data;
+            obj.allChannelLabels = obj.channelLabels;
+
             obj.setDefaultParams(params);
             obj.microstateResults = [];
-        obj.artifactDetector = ArtifactDetectionClass();
+            obj.artifactDetector = ArtifactDetectionClass();
         end
 
         function runAnalysis(obj)
-                fprintf('Starting microstate analysis with comprehensive data cleaning...\n');
+            fprintf('Starting microstate analysis with comprehensive data cleaning...\n');
+
+            % Configure artifact detector with ALL original channels for ECG detection
+            obj.artifactDetector.fs = obj.fs;
+            obj.artifactDetector.channelLabels = obj.allChannelLabels;
             
-            % Perform comprehensive data cleaning
+            % Perform comprehensive data cleaning on ALL channels first
             [cleanData, artifactInfo] = obj.artifactDetector.fullDataCleaning(...
-                obj.data, obj.channelLabels, obj.fs, []);
+                obj.allChannelData, obj.allChannelLabels, obj.fs, []);
             
-            % Update data with cleaned version
-            obj.data = cleanData;
+            % Now select only the microstate channels from the cleaned data
+            obj.selectMicrostateChannelsFromCleanedData(cleanData);
+            
             obj.cleaningSummary = obj.artifactDetector.getCleaningSummary();
             
-            % Continue with microstate analysis...
-            [dataProc, fsNew] = obj.preprocessData(obj.data, obj.fs);
-            
+            % Check if we have data after cleaning and channel selection
             if isempty(obj.data)
-                warning('No data to process.');
+                warning('No data to process after cleaning and channel selection.');
                 return;
             end
 
             fprintf('Starting microstate analysis on %d channels...\n', size(obj.data, 1));
             
+            % Preprocess the cleaned and selected data
             [dataProc, fsNew] = obj.preprocessData(obj.data, obj.fs);
             
             % Calculate GFP and find peaks
@@ -296,43 +309,28 @@ classdef MicrostateAnalysisClass < handle
             % Get sampling rate (same as spindle detection)
             obj.fs = obj.getSamplingRate(1);
             
-            % Select channels for microstate analysis
-            obj.selectMicrostateChannels();
+            % Store ALL channels including ECG for cleaning phase
+            obj.allChannelData = obj.data;
+            obj.allChannelLabels = obj.channelLabels;
             
-            fprintf('Microstate channels: %s\n', strjoin(obj.channelLabels, ', '));
+            fprintf('All available channels: %s\n', strjoin(obj.allChannelLabels, ', '));
             fprintf('Sampling rate: %.1f Hz\n', obj.fs);
             fprintf('Data size: %d channels x %d samples\n', size(obj.data, 1), size(obj.data, 2));
         end
 
-        function selectMicrostateChannels(obj)
-            % Select appropriate channels for microstate analysis
+        function selectMicrostateChannelsFromCleanedData(obj, cleanData)
+            % Select microstate channels from already cleaned data
             targetChannels = {'F3-M2', 'F4-M1', 'C3-M2', 'C4-M1', 'O1-M2', 'O2-M1'};
             
             availableChannels = {};
             channelIndices = [];
             
+            % Find target channels in original channel labels
             for i = 1:length(targetChannels)
-                idx = find(strcmp(obj.channelLabels, targetChannels{i}));
+                idx = find(strcmp(obj.allChannelLabels, targetChannels{i}));
                 if ~isempty(idx)
                     availableChannels{end+1} = targetChannels{i};
                     channelIndices(end+1) = idx(1);
-                    fprintf('Selected channel: %s\n', targetChannels{i});
-                end
-            end
-            
-            if isempty(availableChannels)
-                % Fallback: use any available EEG channels
-                fprintf('No standard bipolar channels found. Using all available EEG channels...\n');
-                eegPatterns = {'F3', 'F4', 'C3', 'C4', 'O1', 'O2', 'Fz', 'Cz', 'Pz'};
-                for i = 1:length(obj.channelLabels)
-                    for j = 1:length(eegPatterns)
-                        if contains(obj.channelLabels{i}, eegPatterns{j})
-                            availableChannels{end+1} = obj.channelLabels{i};
-                            channelIndices(end+1) = i;
-                            fprintf('Selected EEG channel: %s\n', obj.channelLabels{i});
-                            break;
-                        end
-                    end
                 end
             end
             
@@ -340,19 +338,21 @@ classdef MicrostateAnalysisClass < handle
                 error('No suitable EEG channels found for microstate analysis.');
             end
             
-            % Update data and channel labels to only include selected channels
-            if iscell(obj.data)
+            % Extract only the microstate channels from cleaned data
+            % Handle both cell array and matrix formats
+            if iscell(cleanData)
                 % Data is in cell array format
-                selectedData = zeros(length(channelIndices), length(obj.data{1}));
+                obj.data = cell(1, length(channelIndices));
                 for i = 1:length(channelIndices)
-                    selectedData(i, :) = obj.data{channelIndices(i)};
+                    obj.data{i} = cleanData{channelIndices(i)};
                 end
-                obj.data = selectedData;
             else
                 % Data is in matrix format
-                obj.data = obj.data(channelIndices, :);
+                obj.data = cleanData(channelIndices, :);
             end
             obj.channelLabels = availableChannels;
+            
+            fprintf('Microstate channels after cleaning: %s\n', strjoin(obj.channelLabels, ', '));
         end
 
         function data = loadEDFData(obj, channelIndices)
@@ -404,10 +404,14 @@ classdef MicrostateAnalysisClass < handle
             dp.gfpPeakDistance = 0.05; % Increased from 0.02 for fewer peaks
             dp.filterBand = [1 40];
             dp.downsampleFs = 128; % Changed to 128 for proper downsampling from 256 Hz
+            dp.preferredChannels = {'F3-M2', 'F4-M1', 'C3-M2', 'C4-M1', 'O1-M2', 'O2-M1'}; % Default
+    
             if isfield(p,'numMaps'), dp.numMaps = p.numMaps; end
             if isfield(p,'gfpPeakDistance'), dp.gfpPeakDistance = p.gfpPeakDistance; end
             if isfield(p,'filterBand'), dp.filterBand = p.filterBand; end
             if isfield(p,'downsampleFs'), dp.downsampleFs = p.downsampleFs; end
+            if isfield(p,'preferredChannels'), dp.preferredChannels = p.preferredChannels; end % Auto-detected channels
+    
             obj.microstateParams = dp;
             
             fprintf('Microstate parameters:\n');
@@ -419,6 +423,15 @@ classdef MicrostateAnalysisClass < handle
 
         function [dataOut, fsOut] = preprocessData(obj, data, fs)
             dp = obj.microstateParams;
+            
+            % Convert cell array to matrix if needed
+            if iscell(data)
+                dataMatrix = zeros(length(data), length(data{1}));
+                for i = 1:length(data)
+                    dataMatrix(i, :) = data{i};
+                end
+                data = dataMatrix;
+            end
             
             % Convert to double and check for invalid values
             data = double(data);
