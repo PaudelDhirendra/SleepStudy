@@ -1,12 +1,13 @@
 classdef SpindleDetectionClass < handle
-    % SpindleDetectionClass: Detect sleep spindles using consistent SpectralTrainClass patterns
+    % SpindleDetectionClass: Detect sleep spindles using Mölle et al. (2011) method
+    % Implements topography-based separation of slow (frontal) and fast (centro-parietal) spindles
 
     properties
         edfLoader
         fs
         channelLabels
         data
-        spindleEvents      % [start_s, end_s, channel_idx, peak_s, duration_s]
+        spindleEvents      % [start_s, end_s, peak_s, RMS_amplitude, duration_s, frequency_Hz, channel_idx]
         detectionParams
         edfPath
         xmlPath
@@ -16,6 +17,12 @@ classdef SpindleDetectionClass < handle
         stage3Mask
         artifactDetector
         cleaningSummary
+        
+        % Mölle method specific properties
+        SO_events          % Slow oscillation events [peak_time, duration, amplitude, channel_idx]
+        slow_spindles      % Slow spindle events (frontal)
+        fast_spindles      % Fast spindle events (centro-parietal)
+        temporalRelations  % SO-spindle timing relationships
     end
 
     methods
@@ -41,250 +48,727 @@ classdef SpindleDetectionClass < handle
             obj.setDefaultParams(params);
             obj.spindleEvents = [];
 
-             obj.artifactDetector = ArtifactDetectionClass();
+            obj.artifactDetector = ArtifactDetectionClass();
             
             % Set ECG parameters from params if provided
             if nargin >= 3 && isfield(params, 'ecgName')
                 obj.artifactDetector.setECGParameters(params.ecgName, params.denoiseEcg);
             end
+            
+            % Initialize Mölle method properties
+            obj.SO_events = [];
+            obj.slow_spindles = [];
+            obj.fast_spindles = [];
+            obj.temporalRelations = struct();
         end
 
         function runDetection(obj, channels, references, just2)
-    fprintf('Starting spindle detection with targeted data cleaning...\n');
-    
-    % Identify which channels we actually need to clean
-    eegChannelIndices = [];
-    eegChannelNames = {};
-    
-    for ch = 1:length(channels)
-        channelName = channels{ch};
-        chIdx = find(strcmp(obj.channelLabels, channelName));
-        if ~isempty(chIdx)
-            eegChannelIndices(end+1) = chIdx;
-            eegChannelNames{end+1} = channelName;
-        end
-    end
-    
-    if isempty(eegChannelIndices)
-        warning('No specified channels found for cleaning');
-        return;
-    end
-    
-    fprintf('Targeted cleaning for %d EEG channels: %s\n', ...
-        length(eegChannelIndices), strjoin(eegChannelNames, ', '));
-    
-    % Extract only the EEG channels we need + ECG for decontamination
-    cleaningChannels = eegChannelIndices;
-    cleaningLabels = eegChannelNames;
-    
-    % Add ECG channel if available and decontamination is enabled
-    if obj.artifactDetector.denoiseEcg
-        ecgIdx = obj.artifactDetector.findECGChannel(obj.channelLabels);
-        if ~isempty(ecgIdx)
-            cleaningChannels(end+1) = ecgIdx;
-            cleaningLabels{end+1} = obj.channelLabels{ecgIdx};
-            fprintf('Including ECG channel for decontamination: %s\n', obj.channelLabels{ecgIdx});
-        end
-    end
-    
-    % Extract only the data we need for cleaning
-    dataToClean = cell(1, length(cleaningChannels));
-    labelsToClean = cell(1, length(cleaningChannels));
-    for i = 1:length(cleaningChannels)
-        dataToClean{i} = obj.data{cleaningChannels(i)};
-        labelsToClean{i} = cleaningLabels{i};
-    end
-    
-    % Perform targeted cleaning only on required channels
-    [cleanData, artifactInfo] = obj.artifactDetector.fullDataCleaning(...
-        dataToClean, labelsToClean, obj.fs, obj.numericHypnogram);
-    
-    % Update only the EEG channels in the main data (keep ECG as original if present)
-    for i = 1:length(eegChannelIndices)
-        obj.data{eegChannelIndices(i)} = cleanData{i};
-    end
-    
-    obj.cleaningSummary = obj.artifactDetector.getCleaningSummary();
-    
-    % Continue with spindle detection as before...
-    if nargin < 4
-        just2 = false;
-    end
-    if nargin < 3
-        references = {};
-    end
-    
-    % Rest of the spindle detection code...
-    fprintf('Running spindle detection on %d channels...\n', length(channels));
-    allEvents = {};
-    
-    for ch = 1:length(channels)
-        channelName = channels{ch};
-        fprintf('Processing channel: %s\n', channelName);
-        
-        % Find channel index
-        chIdx = find(strcmp(obj.channelLabels, channelName));
-        if isempty(chIdx)
-            fprintf('Channel %s not found. Available: %s\n', channelName, strjoin(obj.channelLabels, ', '));
-            continue;
-        end
-        
-        x = obj.data{chIdx};
-        events = obj.detectSpindlesOnChannel(x, channelName, just2);
-        if ~isempty(events)
-            events = [events, repmat(chIdx, size(events,1), 1)];
-            allEvents{end+1} = events;
-        end
-    end
-    
-    if ~isempty(allEvents)
-        obj.spindleEvents = vertcat(allEvents{:});
-        fprintf('Total spindles detected: %d\n', size(obj.spindleEvents,1));
-    else
-        obj.spindleEvents = [];
-        fprintf('No spindles detected in any channel\n');
-    end
-end
-
-  function saveResults(obj, outputFile)
-    if isempty(obj.spindleEvents)
-        warning('No spindles to save.');
-        T = table();
-        writetable(T, outputFile);
-        fprintf('Saved empty results to: %s\n', outputFile);
-        return;
-    end
-    
-    % Create basic table
-    if size(obj.spindleEvents, 2) == 6
-        T = array2table(obj.spindleEvents, ...
-            'VariableNames',{'Start_sec','End_sec','Peak_sec','RMS_Amplitude','Duration_sec','ChannelIdx'});
-    else
-        T = array2table(obj.spindleEvents);
-    end
-    
-    % Add channel names
-    channelNames = cell(height(T), 1);
-    for i = 1:height(T)
-        if T.ChannelIdx(i) <= length(obj.channelLabels)
-            channelNames{i} = obj.channelLabels{T.ChannelIdx(i)};
-        else
-            channelNames{i} = 'Unknown';
-        end
-    end
-    T.ChannelName = channelNames;
-    
-    % Add sleep stage information if hypnogram available
-    if ~isempty(obj.numericHypnogram)
-        stageLabels = cell(height(T), 1);
-        cycleNumbers = zeros(height(T), 1);
-        
-        fprintf('Adding sleep stage information...\n');
-        
-        for i = 1:height(T)
-            % Determine which epoch contains the spindle peak
-            epochNumber = ceil(T.Peak_sec(i) / 30); % 30-second epochs
+            % Main detection method using Mölle et al. (2011) approach
+            fprintf('Starting spindle detection using Mölle et al. (2011) method...\n');
             
-            if epochNumber <= length(obj.numericHypnogram)
-                stageNum = obj.numericHypnogram(epochNumber);
+            % Data cleaning
+            eegChannelIndices = [];
+            eegChannelNames = {};
+            
+            for ch = 1:length(channels)
+                channelName = channels{ch};
+                chIdx = find(strcmp(obj.channelLabels, channelName));
+                if ~isempty(chIdx)
+                    eegChannelIndices(end+1) = chIdx;
+                    eegChannelNames{end+1} = channelName;
+                end
+            end
+            
+            if isempty(eegChannelIndices)
+                warning('No specified channels found for cleaning');
+                return;
+            end
+            
+            fprintf('Targeted cleaning for %d EEG channels: %s\n', ...
+                length(eegChannelIndices), strjoin(eegChannelNames, ', '));
+            
+            cleaningChannels = eegChannelIndices;
+            cleaningLabels = eegChannelNames;
+            
+            if obj.artifactDetector.denoiseEcg
+                ecgIdx = obj.artifactDetector.findECGChannel(obj.channelLabels);
+                if ~isempty(ecgIdx)
+                    cleaningChannels(end+1) = ecgIdx;
+                    cleaningLabels{end+1} = obj.channelLabels{ecgIdx};
+                    fprintf('Including ECG channel for decontamination: %s\n', obj.channelLabels{ecgIdx});
+                end
+            end
+            
+            dataToClean = cell(1, length(cleaningChannels));
+            labelsToClean = cell(1, length(cleaningChannels));
+            for i = 1:length(cleaningChannels)
+                dataToClean{i} = obj.data{cleaningChannels(i)};
+                labelsToClean{i} = cleaningLabels{i};
+            end
+            
+            [cleanData, artifactInfo] = obj.artifactDetector.fullDataCleaning(...
+                dataToClean, labelsToClean, obj.fs, obj.numericHypnogram);
+            
+            for i = 1:length(eegChannelIndices)
+                obj.data{eegChannelIndices(i)} = cleanData{i};
+            end
+            
+            obj.cleaningSummary = obj.artifactDetector.getCleaningSummary();
+            
+            % Set default parameters - Mölle method only detects in NREM sleep
+            if nargin < 4
+                just2 = true; % Default to NREM sleep only (N2 + SWS)
+            end
+            if nargin < 3
+                references = {};
+            end
+            
+            % Run Mölle detection method
+            fprintf('Running Mölle et al. (2011) spindle detection...\n');
+            
+            try
+                % 1. Detect Slow Oscillations (in NREM sleep only)
+                fprintf('Detecting slow oscillations in NREM sleep...\n');
+                obj.SO_events = obj.detectSlowOscillations();
                 
-                % Convert numeric stage to label
-                switch stageNum
-                    case 0, stageLabels{i} = 'W';
-                    case 1, stageLabels{i} = 'N1';
-                    case 2, stageLabels{i} = 'N2';
-                    case 3, stageLabels{i} = 'N3';
-                    case 4, stageLabels{i} = 'N3';
-                    case 5, stageLabels{i} = 'REM';
-                    otherwise, stageLabels{i} = 'Unknown';
+                % 2. Detect Spindles with topography separation (NREM sleep only)
+                fprintf('Detecting slow and fast spindles in NREM sleep...\n');
+                [obj.slow_spindles, obj.fast_spindles] = obj.detectSpindlesMolleMethod(just2);
+                
+                % 3. Combine all spindles
+                obj.spindleEvents = [obj.slow_spindles; obj.fast_spindles];
+                
+                % 4. Analyze temporal relationships
+                if ~isempty(obj.SO_events) && (~isempty(obj.slow_spindles) || ~isempty(obj.fast_spindles))
+                    fprintf('Analyzing temporal relationships...\n');
+                    obj.analyzeTemporalRelationships();
                 end
-            else
-                stageLabels{i} = 'Unknown';
-            end
-            
-            % Progress update for large datasets
-            if mod(i, 1000) == 0
-                fprintf('  Processed %d/%d spindles...\n', i, height(T));
+                
+                fprintf('Mölle detection completed:\n');
+                fprintf('  Slow oscillations: %d\n', size(obj.SO_events, 1));
+                fprintf('  Slow spindles: %d\n', size(obj.slow_spindles, 1));
+                fprintf('  Fast spindles: %d\n', size(obj.fast_spindles, 1));
+                fprintf('  Total spindles: %d\n', size(obj.spindleEvents, 1));
+                
+            catch ME
+                fprintf('Error in spindle detection: %s\n', ME.message);
+                % Initialize empty results to prevent further errors
+                obj.SO_events = [];
+                obj.slow_spindles = [];
+                obj.fast_spindles = [];
+                obj.spindleEvents = [];
+                rethrow(ME);
             end
         end
-        
-        T.SleepStage = stageLabels;
-        
-        % Add cycle information with timeout protection
-        fprintf('Adding cycle information...\n');
-        try
-            % Set a timeout for cycle detection
-            cycles = [];
-            if exist('sleep_cycles', 'file')
-                % Try with timeout
-                try
-                    cycles = sleep_cycles(obj.numericHypnogram);
-                    fprintf('Identified %d sleep cycles\n', length(unique(cycles(cycles > 0))));
-                catch ME
-                    fprintf('Cycle detection failed: %s\n', ME.message);
-                    cycles = [];
+
+        function saveResults(obj, outputFile)
+            % Save comprehensive results using Mölle method
+            if isempty(obj.spindleEvents)
+                warning('No spindles to save.');
+                
+                % Create empty tables with proper structure
+                emptySpindleTable = table();
+                emptyGlobalTable = table();
+                emptyChannelTable = table();
+                emptySOTable = table();
+                emptyStageTable = table();
+                emptyCycleTable = table();
+                emptyQualityTable = table();
+                
+                writetable(emptySpindleTable, outputFile, 'Sheet', 'Individual_Spindles');
+                writetable(emptyGlobalTable, outputFile, 'Sheet', 'Global_Statistics');
+                writetable(emptyChannelTable, outputFile, 'Sheet', 'Channel_Statistics');
+                writetable(emptySOTable, outputFile, 'Sheet', 'Slow_Oscillations');
+                writetable(emptyStageTable, outputFile, 'Sheet', 'Stage_Statistics');
+                writetable(emptyCycleTable, outputFile, 'Sheet', 'Cycle_Statistics');
+                writetable(emptyQualityTable, outputFile, 'Sheet', 'Data_Quality');
+                
+                fprintf('Saved empty results to: %s\n', outputFile);
+                return;
+            end
+            
+            fprintf('Saving comprehensive Mölle et al. (2011) method results...\n');
+            
+            %% 1. INDIVIDUAL SPINDLE EVENTS
+            fprintf('Building individual spindle table...\n');
+            
+            nSpindles = size(obj.spindleEvents, 1);
+            channelNames = cell(nSpindles, 1);
+            stageLabels = cell(nSpindles, 1);
+            cycleNumbers = zeros(nSpindles, 1);
+            spindleTypes = cell(nSpindles, 1);
+            topographicalRegions = cell(nSpindles, 1);
+
+            % Create base table
+            T = array2table(obj.spindleEvents, ...
+                'VariableNames', {'Start_sec','End_sec','Peak_sec','RMS_Amplitude','Duration_sec','Frequency_Hz','ChannelIdx'});
+            
+            % Classify spindle types based on topography and frequency
+            frontalChannels = {'F3-M2', 'F4-M1', 'F3', 'F4', 'Fz', 'F1', 'F2'};
+            centralChannels = {'C3-M2', 'C4-M1', 'C3', 'C4', 'Cz', 'C1', 'C2', 'P3', 'P4', 'Pz'};
+
+            for i = 1:nSpindles
+                if T.ChannelIdx(i) <= length(obj.channelLabels)
+                    channelNames{i} = obj.channelLabels{T.ChannelIdx(i)};
+                    
+                    % Classify based on topography (Mölle method)
+                    if any(strcmp(frontalChannels, channelNames{i}))
+                        topographicalRegions{i} = 'Frontal';
+                        spindleTypes{i} = 'Slow';
+                    elseif any(strcmp(centralChannels, channelNames{i}))
+                        topographicalRegions{i} = 'Central';
+                        spindleTypes{i} = 'Fast';
+                    else
+                        topographicalRegions{i} = 'Other';
+                        % Classify by frequency if topography unknown
+                        if T.Frequency_Hz(i) >= 11 && T.Frequency_Hz(i) < 13.5
+                            spindleTypes{i} = 'Slow';
+                        elseif T.Frequency_Hz(i) >= 13.5 && T.Frequency_Hz(i) <= 16
+                            spindleTypes{i} = 'Fast';
+                        else
+                            spindleTypes{i} = 'Atypical';
+                        end
+                    end
+                else
+                    channelNames{i} = 'Unknown';
+                    topographicalRegions{i} = 'Unknown';
+                    spindleTypes{i} = 'Unknown';
                 end
             end
             
-            if ~isempty(cycles)
-                for i = 1:height(T)
+            T.ChannelName = channelNames;
+            T.TopographicalRegion = topographicalRegions;
+            T.SpindleType = spindleTypes;
+            
+            % Add sleep stage information
+            if ~isempty(obj.numericHypnogram)
+                fprintf('Adding sleep stage information...\n');
+                
+                for i = 1:nSpindles
                     epochNumber = ceil(T.Peak_sec(i) / 30);
-                    if epochNumber <= length(cycles)
-                        cycleNumbers(i) = cycles(epochNumber);
+                    if epochNumber <= length(obj.numericHypnogram)
+                        stageNum = obj.numericHypnogram(epochNumber);
+                        switch stageNum
+                            case 0, stageLabels{i} = 'W';
+                            case 1, stageLabels{i} = 'N1';
+                            case 2, stageLabels{i} = 'N2';
+                            case 3, stageLabels{i} = 'N3';
+                            case 4, stageLabels{i} = 'N3';
+                            case 5, stageLabels{i} = 'REM';
+                            otherwise, stageLabels{i} = 'Unknown';
+                        end
+                    else
+                        stageLabels{i} = 'Unknown';
+                    end
+                end
+                T.SleepStage = stageLabels;
+            else
+                T.SleepStage = repmat({'Unknown'}, nSpindles, 1);
+            end
+
+            %% 2. SLOW OSCILLATION EVENTS
+            SO_table = table();
+            SO_cycleNumbers = [];
+            if ~isempty(obj.SO_events)
+                SO_table = array2table(obj.SO_events, ...
+                    'VariableNames', {'Peak_sec','Duration_sec','Amplitude_uV','ChannelIdx'});
+                
+                SO_channelNames = cell(size(SO_table, 1), 1);
+                for i = 1:size(SO_table, 1)
+                    if SO_table.ChannelIdx(i) <= length(obj.channelLabels)
+                        SO_channelNames{i} = obj.channelLabels{SO_table.ChannelIdx(i)};
+                    else
+                        SO_channelNames{i} = 'Unknown';
+                    end
+                end
+                SO_table.ChannelName = SO_channelNames;
+                
+                % Add sleep stage information for SOs
+                if ~isempty(obj.numericHypnogram)
+                    SO_stageLabels = cell(size(SO_table, 1), 1);
+                    for i = 1:size(SO_table, 1)
+                        epochNumber = ceil(SO_table.Peak_sec(i) / 30);
+                        if epochNumber <= length(obj.numericHypnogram)
+                            stageNum = obj.numericHypnogram(epochNumber);
+                            switch stageNum
+                                case 0, SO_stageLabels{i} = 'W';
+                                case 1, SO_stageLabels{i} = 'N1';
+                                case 2, SO_stageLabels{i} = 'N2';
+                                case 3, SO_stageLabels{i} = 'N3';
+                                case 4, SO_stageLabels{i} = 'N3';
+                                case 5, SO_stageLabels{i} = 'REM';
+                                otherwise, SO_stageLabels{i} = 'Unknown';
+                            end
+                        else
+                            SO_stageLabels{i} = 'Unknown';
+                        end
+                    end
+                    SO_table.SleepStage = SO_stageLabels;
+                end
+            end
+
+            %% 3. COMPREHENSIVE SUMMARY STATISTICS
+            fprintf('Building summary statistics...\n');
+            totalSleepTime = obj.calculateTotalSleepTime();
+            totalNREMTime = obj.calculateNREMTime(); % N2 + SWS time for Mölle method
+
+            % Calculate separate N2 and N3 times
+            if ~isempty(obj.numericHypnogram)
+                N2_time = sum(obj.numericHypnogram == 2) * 30 / 60;
+                N3_time = sum(obj.numericHypnogram == 3 | obj.numericHypnogram == 4) * 30 / 60;
+            else
+                N2_time = 0;
+                N3_time = 0;
+            end
+
+            % Calculate sleep cycles from NREM sleep only
+            cycleStats = table();
+            cycleNumbers = zeros(nSpindles, 1);
+            nCycles = 0;
+            meanCycleDuration = 0;
+            stdCycleDuration = 0;
+            totalCycleSpindles = 0;
+            meanSpindlesPerCycle = 0;
+
+            if ~isempty(obj.numericHypnogram)
+                fprintf('Adding cycle information (NREM-based)...\n');
+                try
+                    cycles = [];
+                    if exist('sleep_cycles', 'file')
+                        try
+                            % Create NREM-only hypnogram for cycle detection
+                            nrem_hypnogram = obj.numericHypnogram;
+                            % Set wake and REM to 0, keep NREM stages as is
+                            nrem_hypnogram(nrem_hypnogram == 0 | nrem_hypnogram == 1 | nrem_hypnogram == 5) = 0;
+                            
+                            cycles = sleep_cycles(nrem_hypnogram);
+                            nCycles = length(unique(cycles(cycles > 0)));
+                            fprintf('Identified %d sleep cycles from NREM sleep\n', nCycles);
+                            
+                            % Assign cycles to spindles
+                            for i = 1:nSpindles
+                                epochNumber = ceil(T.Peak_sec(i) / 30);
+                                if epochNumber <= length(cycles)
+                                    cycleNumbers(i) = cycles(epochNumber);
+                                end
+                            end
+                            T.CycleNumber = cycleNumbers;
+                            
+                            % Assign cycles to SOs
+                            if ~isempty(obj.SO_events)
+                                SO_cycleNumbers = zeros(size(obj.SO_events, 1), 1);
+                                for i = 1:size(obj.SO_events, 1)
+                                    epochNumber = ceil(obj.SO_events(i,1) / 30);
+                                    if epochNumber <= length(cycles)
+                                        SO_cycleNumbers(i) = cycles(epochNumber);
+                                    end
+                                end
+                            end
+                            
+                            % Create cycle statistics table
+                            uniqueCycles = unique(cycles(cycles > 0));
+                            nCycles = length(uniqueCycles);
+                            
+                            cycleStats = table('Size', [nCycles, 8], ...
+                                'VariableTypes', {'cell', 'double', 'double', 'double', 'double', 'double', 'double', 'double'}, ...
+                                'VariableNames', {'Cycle', 'Total_Spindle_Count', 'Slow_Spindle_Count', 'Fast_Spindle_Count', ...
+                                                 'SO_Count', 'Spindle_Density_per_min', 'Slow_Spindle_Density_per_min', 'Fast_Spindle_Density_per_min'});
+                            
+                            totalCycleTime = zeros(nCycles, 1);
+                            
+                            for i = 1:nCycles
+                                cycleNum = uniqueCycles(i);
+                                
+                                % Count spindles in this cycle
+                                cycleSpindles = sum(cycleNumbers == cycleNum);
+                                cycleSlow = sum(cycleNumbers == cycleNum & strcmp(spindleTypes, 'Slow'));
+                                cycleFast = sum(cycleNumbers == cycleNum & strcmp(spindleTypes, 'Fast'));
+                                
+                                % Count SOs in this cycle
+                                if ~isempty(SO_cycleNumbers)
+                                    cycleSOs = sum(SO_cycleNumbers == cycleNum);
+                                else
+                                    cycleSOs = 0;
+                                end
+                                
+                                % Calculate cycle duration (NREM epochs in this cycle)
+                                cycleEpochs = sum(cycles == cycleNum);
+                                cycleDuration = cycleEpochs * 30 / 60; % minutes
+                                totalCycleTime(i) = cycleDuration;
+                                
+                                cycleStats.Cycle{i} = sprintf('Cycle_%d', cycleNum);
+                                cycleStats.Total_Spindle_Count(i) = cycleSpindles;
+                                cycleStats.Slow_Spindle_Count(i) = cycleSlow;
+                                cycleStats.Fast_Spindle_Count(i) = cycleFast;
+                                cycleStats.SO_Count(i) = cycleSOs;
+                                cycleStats.Spindle_Density_per_min(i) = cycleSpindles / max(cycleDuration, 0.1);
+                                cycleStats.Slow_Spindle_Density_per_min(i) = cycleSlow / max(cycleDuration, 0.1);
+                                cycleStats.Fast_Spindle_Density_per_min(i) = cycleFast / max(cycleDuration, 0.1);
+                            end
+                            
+                            % Add cycle summary to global stats
+                            if nCycles > 0
+                                meanCycleDuration = mean(totalCycleTime);
+                                stdCycleDuration = std(totalCycleTime);
+                                totalCycleSpindles = sum(cycleStats.Total_Spindle_Count);
+                                meanSpindlesPerCycle = mean(cycleStats.Total_Spindle_Count);
+                            end
+                            
+                        catch ME
+                            fprintf('Cycle detection failed: %s\n', ME.message);
+                            cycles = [];
+                            T.CycleNumber = zeros(nSpindles, 1);
+                        end
+                    else
+                        fprintf('sleep_cycles function not available\n');
+                        T.CycleNumber = zeros(nSpindles, 1);
                     end
                     
-                    % Progress update
-                    if mod(i, 1000) == 0
-                        fprintf('  Added cycles to %d/%d spindles...\n', i, height(T));
-                    end
+                catch ME
+                    fprintf('Error in cycle assignment: %s\n', ME.message);
+                    T.CycleNumber = zeros(nSpindles, 1);
                 end
-                T.CycleNumber = cycleNumbers;
             else
-                T.CycleNumber = zeros(height(T), 1);
-                fprintf('No cycle information available\n');
+                T.CycleNumber = zeros(nSpindles, 1);
+            end
+
+            % Spindle statistics - TOTAL
+            slowSpindles = sum(strcmp(spindleTypes, 'Slow'));
+            fastSpindles = sum(strcmp(spindleTypes, 'Fast'));
+            atypicalSpindles = sum(strcmp(spindleTypes, 'Atypical'));
+            totalSpindles = nSpindles;
+
+            % Spindle statistics - BY STAGE
+            N2_spindles = obj.countSpindlesInStage(2);
+            N3_spindles = obj.countSpindlesInStage(3) + obj.countSpindlesInStage(4);
+            N2_slow = obj.countSpindlesInStageByType(2, 'Slow');
+            N2_fast = obj.countSpindlesInStageByType(2, 'Fast');
+            N3_slow = obj.countSpindlesInStageByType(3, 'Slow') + obj.countSpindlesInStageByType(4, 'Slow');
+            N3_fast = obj.countSpindlesInStageByType(3, 'Fast') + obj.countSpindlesInStageByType(4, 'Fast');
+
+            % Density calculations
+            spindleDensity_NREM = totalSpindles / totalNREMTime;
+            spindleDensity_N2 = N2_spindles / max(N2_time, 0.1);
+            spindleDensity_N3 = N3_spindles / max(N3_time, 0.1);
+            slowSpindleDensity_N2 = N2_slow / max(N2_time, 0.1);
+            fastSpindleDensity_N2 = N2_fast / max(N2_time, 0.1);
+            slowSpindleDensity_N3 = N3_slow / max(N3_time, 0.1);
+            fastSpindleDensity_N3 = N3_fast / max(N3_time, 0.1);
+
+            % SO statistics
+            if ~isempty(obj.SO_events)
+                SO_count = size(obj.SO_events, 1);
+                SO_N2 = obj.countSOsInStage(2);
+                SO_N3 = obj.countSOsInStage(3) + obj.countSOsInStage(4);
+                SO_density_NREM = SO_count / totalNREMTime;
+                SO_density_N2 = SO_N2 / max(N2_time, 0.1);
+                SO_density_N3 = SO_N3 / max(N3_time, 0.1);
+                
+                % Calculate SO characteristics
+                SO_duration_mean = mean(obj.SO_events(:,2)) * 1000;
+                SO_duration_std = std(obj.SO_events(:,2)) * 1000;
+                SO_amplitude_mean = mean(abs(obj.SO_events(:,3)));
+                SO_amplitude_std = std(abs(obj.SO_events(:,3)));
+            else
+                SO_count = 0; SO_N2 = 0; SO_N3 = 0;
+                SO_density_NREM = 0; SO_density_N2 = 0; SO_density_N3 = 0;
+                SO_duration_mean = 0; SO_duration_std = 0;
+                SO_amplitude_mean = 0; SO_amplitude_std = 0;
+            end
+
+            % Topographical statistics
+            frontalSpindles = sum(strcmp(topographicalRegions, 'Frontal'));
+            centralSpindles = sum(strcmp(topographicalRegions, 'Central'));
+            otherSpindles = sum(strcmp(topographicalRegions, 'Other'));
+
+            % Global Statistics Table
+            globalStats = {
+                % Total counts
+                'Total_Spindle_Count', totalSpindles;
+                'Slow_Spindle_Count', slowSpindles;
+                'Fast_Spindle_Count', fastSpindles;
+                'Atypical_Spindle_Count', atypicalSpindles;
+                'Slow_Oscillation_Count', SO_count;
+                
+                % Sleep stage durations
+                'Total_Sleep_Time_min', totalSleepTime;
+                'NREM_Sleep_Time_min', totalNREMTime;
+                'N2_Sleep_Time_min', N2_time;
+                'N3_Sleep_Time_min', N3_time;
+                
+                % Cycle statistics
+                'Number_of_Sleep_Cycles', nCycles;
+                'Mean_Cycle_Duration_min', meanCycleDuration;
+                'Std_Cycle_Duration_min', stdCycleDuration;
+                'Total_Spindles_in_Cycles', totalCycleSpindles;
+                'Mean_Spindles_per_Cycle', meanSpindlesPerCycle;
+                
+                % Spindle densities - NREM combined
+                'Spindle_Density_per_min_NREM', spindleDensity_NREM;
+                'Slow_Spindle_Density_per_min_NREM', slowSpindles / totalNREMTime;
+                'Fast_Spindle_Density_per_min_NREM', fastSpindles / totalNREMTime;
+                
+                % Spindle densities - SEPARATE N2/N3
+                'Spindle_Density_per_min_N2', spindleDensity_N2;
+                'Spindle_Density_per_min_N3', spindleDensity_N3;
+                'Slow_Spindle_Density_per_min_N2', slowSpindleDensity_N2;
+                'Fast_Spindle_Density_per_min_N2', fastSpindleDensity_N2;
+                'Slow_Spindle_Density_per_min_N3', slowSpindleDensity_N3;
+                'Fast_Spindle_Density_per_min_N3', fastSpindleDensity_N3;
+                
+                % SO densities - SEPARATE N2/N3
+                'SO_Density_per_min_NREM', SO_density_NREM;
+                'SO_Density_per_min_N2', SO_density_N2;
+                'SO_Density_per_min_N3', SO_density_N3;
+                
+                % Ratios and other stats
+                'Slow_Fast_Ratio', slowSpindles / max(fastSpindles, 1);
+                'N2_N3_Spindle_Ratio', N2_spindles / max(N3_spindles, 1);
+                'SO_Spindle_Ratio_NREM', SO_count / max(totalSpindles, 1);
+                
+                % Individual spindle characteristics
+                'Mean_Spindle_Duration_ms', mean(T.Duration_sec) * 1000;
+                'Std_Spindle_Duration_ms', std(T.Duration_sec) * 1000;
+                'Mean_Spindle_Frequency_Hz', mean(T.Frequency_Hz);
+                'Std_Spindle_Frequency_Hz', std(T.Frequency_Hz);
+                'Mean_Slow_Spindle_Frequency_Hz', mean(T.Frequency_Hz(strcmp(spindleTypes, 'Slow')));
+                'Mean_Fast_Spindle_Frequency_Hz', mean(T.Frequency_Hz(strcmp(spindleTypes, 'Fast')));
+                
+                % SO characteristics
+                'Mean_SO_Duration_ms', SO_duration_mean;
+                'Std_SO_Duration_ms', SO_duration_std;
+                'Mean_SO_Amplitude_uV', SO_amplitude_mean;
+                'Std_SO_Amplitude_uV', SO_amplitude_std;
+                
+                % Topographical statistics
+                'Frontal_Spindle_Count', frontalSpindles;
+                'Central_Spindle_Count', centralSpindles;
+                'Other_Spindle_Count', otherSpindles;
+                'Frontal_Spindle_Percentage', (frontalSpindles / totalSpindles) * 100;
+                'Central_Spindle_Percentage', (centralSpindles / totalSpindles) * 100;
+                
+                % Data quality
+                'Artifact_Free_Sleep_Percent', obj.cleaningSummary.cleanDataPercentage;
+                'ECG_Decontamination_Applied', obj.cleaningSummary.ecgDecontaminationApplied;
+            };
+            
+            globalTable = cell2table(globalStats, 'VariableNames', {'Parameter', 'Value'});
+
+            % Channel-specific Statistics
+            channels = unique(obj.spindleEvents(:,7));
+            nChannels = length(channels);
+            
+            channelStats = table('Size', [nChannels, 8], ...
+                'VariableTypes', {'cell', 'double', 'double', 'double', 'double', 'double', 'double', 'cell'}, ...
+                'VariableNames', {'Channel', 'Total_Spindle_Count', 'Slow_Spindle_Count', 'Fast_Spindle_Count', ...
+                                 'Spindle_Density_per_min_NREM', 'Mean_Frequency_Hz', 'Mean_Duration_ms', 'Topographical_Region'});
+            
+            for i = 1:nChannels
+                channelIdx = channels(i);
+                channelSpindles = obj.spindleEvents(obj.spindleEvents(:,7) == channelIdx, :);
+                channelName = obj.channelLabels{channelIdx};
+                
+                channelSpindleTypes = spindleTypes(obj.spindleEvents(:,7) == channelIdx);
+                
+                channelStats.Channel{i} = channelName;
+                channelStats.Total_Spindle_Count(i) = size(channelSpindles, 1);
+                channelStats.Slow_Spindle_Count(i) = sum(strcmp(channelSpindleTypes, 'Slow'));
+                channelStats.Fast_Spindle_Count(i) = sum(strcmp(channelSpindleTypes, 'Fast'));
+                channelStats.Spindle_Density_per_min_NREM(i) = size(channelSpindles, 1) / totalNREMTime;
+                channelStats.Mean_Frequency_Hz(i) = mean(channelSpindles(:,6));
+                channelStats.Mean_Duration_ms(i) = mean(channelSpindles(:,5)) * 1000;
+                
+                if any(strcmp(frontalChannels, channelName))
+                    channelStats.Topographical_Region{i} = 'Frontal';
+                elseif any(strcmp(centralChannels, channelName))
+                    channelStats.Topographical_Region{i} = 'Central';
+                else
+                    channelStats.Topographical_Region{i} = 'Other';
+                end
+            end
+
+            % Sleep Stage Statistics - Focus on NREM stages
+            stageStats = table();
+            if ~isempty(obj.numericHypnogram)
+                stages = [2, 3]; % N2, N3 (SWS)
+                stageNames = {'N2', 'N3'};
+                nStages = length(stages);
+                
+                stageStats = table('Size', [nStages, 6], ...
+                    'VariableTypes', {'cell', 'double', 'double', 'double', 'double', 'double'}, ...
+                    'VariableNames', {'Stage', 'Total_Spindle_Count', 'Slow_Spindle_Count', 'Fast_Spindle_Count', ...
+                                     'Stage_Duration_min', 'Spindle_Density_per_min'});
+                
+                for i = 1:nStages
+                    stageDur = sum(obj.numericHypnogram == stages(i)) * 30 / 60;
+                    stageTotal = obj.countSpindlesInStage(stages(i));
+                    stageSlow = obj.countSpindlesInStageByType(stages(i), 'Slow');
+                    stageFast = obj.countSpindlesInStageByType(stages(i), 'Fast');
+                    
+                    stageStats.Stage{i} = stageNames{i};
+                    stageStats.Total_Spindle_Count(i) = stageTotal;
+                    stageStats.Slow_Spindle_Count(i) = stageSlow;
+                    stageStats.Fast_Spindle_Count(i) = stageFast;
+                    stageStats.Stage_Duration_min(i) = stageDur;
+                    stageStats.Spindle_Density_per_min(i) = stageTotal / max(stageDur, 0.1);
+                end
+            end
+
+            % Data Quality Metrics
+            qualityStats = {
+                'Total_Recording_Time_min', length(obj.data{1}) / obj.fs / 60;
+                'Artifact_Free_Percent', obj.cleaningSummary.cleanDataPercentage;
+                'Artifact_Percent', obj.cleaningSummary.artifactPercentage;
+                'ECG_Decontamination_Applied', obj.cleaningSummary.ecgDecontaminationApplied;
+                'ECG_Contamination_Score', obj.cleaningSummary.ecgContaminationScore;
+                'Total_Artifacts', obj.cleaningSummary.totalArtifacts;
+            };
+            
+            qualityTable = cell2table(qualityStats, 'VariableNames', {'Parameter', 'Value'});
+
+            %% 4. WRITE ALL SHEETS TO EXCEL
+            fprintf('Writing to Excel file...\n');
+            writetable(T, outputFile, 'Sheet', 'Individual_Spindles');
+            writetable(globalTable, outputFile, 'Sheet', 'Global_Statistics');
+            writetable(channelStats, outputFile, 'Sheet', 'Channel_Statistics');
+            
+            if ~isempty(SO_table)
+                % Add cycle numbers to SO table if available
+                if ~isempty(SO_cycleNumbers)
+                    SO_table.CycleNumber = SO_cycleNumbers;
+                end
+                writetable(SO_table, outputFile, 'Sheet', 'Slow_Oscillations');
             end
             
-        catch ME
-            fprintf('Error in cycle assignment: %s. Skipping cycle info.\n', ME.message);
-            T.CycleNumber = zeros(height(T), 1);
+            if ~isempty(stageStats) && height(stageStats) > 0
+                writetable(stageStats, outputFile, 'Sheet', 'Stage_Statistics');
+            end
+            
+            if ~isempty(cycleStats) && height(cycleStats) > 0
+                writetable(cycleStats, outputFile, 'Sheet', 'Cycle_Statistics');
+            end
+            
+            writetable(qualityTable, outputFile, 'Sheet', 'Data_Quality');
+            
+            fprintf('SUCCESS: Saved comprehensive Mölle method results to: %s\n', outputFile);
+            fprintf('Sheets created:\n');
+            fprintf('  - Individual_Spindles: %d spindle events\n', nSpindles);
+            fprintf('  - Global_Statistics: Overall summary metrics\n');
+            fprintf('  - Channel_Statistics: %d channels analyzed\n', nChannels);
+            if ~isempty(SO_table)
+                fprintf('  - Slow_Oscillations: %d SO events\n', SO_count);
+            end
+            if ~isempty(stageStats)
+                fprintf('  - Stage_Statistics: Sleep stage distributions\n');
+            end
+            if ~isempty(cycleStats)
+                fprintf('  - Cycle_Statistics: %d sleep cycles\n', nCycles);
+            end
+            fprintf('  - Data_Quality: Recording quality metrics\n');
         end
-    else
-        T.SleepStage = repmat({'Unknown'}, height(T), 1);
-        T.CycleNumber = zeros(height(T), 1);
-    end
-    
-    % Add frequency information (quick calculation)
-    fprintf('Adding frequency information...\n');
-    frequencyHz = zeros(height(T), 1);
-    for i = 1:height(T)
-        % Simple frequency estimation
-        if T.Duration_sec(i) > 0
-            frequencyHz(i) = min(max(11, 7/T.Duration_sec(i)), 16);
-        else
-            frequencyHz(i) = 13.5;
+
+        function totalSleepTime = calculateTotalSleepTime(obj)
+            if isempty(obj.numericHypnogram)
+                totalSleepTime = length(obj.data{1}) / obj.fs / 60;
+                return;
+            end
+            
+            sleepEpochs = sum(obj.numericHypnogram >= 1 & obj.numericHypnogram <= 5);
+            totalSleepTime = sleepEpochs * 30 / 60;
         end
-    end
-    T.EstimatedFrequency_Hz = frequencyHz;
-    
-    % Save the table
-    writetable(T, outputFile);
-    fprintf('SUCCESS: Saved %d spindles to: %s\n', height(T), outputFile);
-    fprintf('Columns: %s\n', strjoin(T.Properties.VariableNames, ', '));
-end
+        
+        function totalNREMTime = calculateNREMTime(obj)
+            % Calculate NREM sleep time (N2 + N3/SWS) for Mölle method density calculations
+            if isempty(obj.numericHypnogram)
+                totalNREMTime = length(obj.data{1}) / obj.fs / 60;
+                return;
+            end
+            
+            % Mölle et al. focused on N2 and SWS (stages 2, 3, 4)
+            nremEpochs = sum(obj.numericHypnogram == 2 | obj.numericHypnogram == 3 | obj.numericHypnogram == 4);
+            totalNREMTime = nremEpochs * 30 / 60;
+        end
+
+        function count = countSpindlesInStage(obj, stageNum)
+            count = 0;
+            for i = 1:size(obj.spindleEvents, 1)
+                epochNumber = ceil(obj.spindleEvents(i,3) / 30);
+                if epochNumber <= length(obj.numericHypnogram) && obj.numericHypnogram(epochNumber) == stageNum
+                    count = count + 1;
+                end
+            end
+        end
+        
+        function count = countSpindlesInStageByType(obj, stageNum, spindleType)
+            count = 0;
+            spindleTypes = obj.classifySpindleTypes();
+            for i = 1:size(obj.spindleEvents, 1)
+                epochNumber = ceil(obj.spindleEvents(i,3) / 30);
+                if epochNumber <= length(obj.numericHypnogram) && ...
+                   obj.numericHypnogram(epochNumber) == stageNum && ...
+                   strcmp(spindleTypes{i}, spindleType)
+                    count = count + 1;
+                end
+            end
+        end
+        
+        function count = countSOsInStage(obj, stageNum)
+            % Count SOs in specific sleep stage
+            count = 0;
+            if isempty(obj.SO_events)
+                return;
+            end
+            
+            for i = 1:size(obj.SO_events, 1)
+                epochNumber = ceil(obj.SO_events(i,1) / 30);
+                if epochNumber <= length(obj.numericHypnogram) && obj.numericHypnogram(epochNumber) == stageNum
+                    count = count + 1;
+                end
+            end
+        end
+        
+        function spindleTypes = classifySpindleTypes(obj)
+            % Classify spindles as Slow or Fast based on topography and frequency
+            nSpindles = size(obj.spindleEvents, 1);
+            spindleTypes = cell(nSpindles, 1);
+            
+            frontalChannels = {'F3-M2', 'F4-M1', 'F3', 'F4', 'Fz', 'F1', 'F2'};
+            centralChannels = {'C3-M2', 'C4-M1', 'C3', 'C4', 'Cz', 'C1', 'C2', 'P3', 'P4', 'Pz'};
+            
+            for i = 1:nSpindles
+                chIdx = obj.spindleEvents(i,7);
+                if chIdx <= length(obj.channelLabels)
+                    channelName = obj.channelLabels{chIdx};
+                    frequency = obj.spindleEvents(i,6);
+                    
+                    if any(strcmp(frontalChannels, channelName))
+                        spindleTypes{i} = 'Slow';
+                    elseif any(strcmp(centralChannels, channelName))
+                        spindleTypes{i} = 'Fast';
+                    else
+                        if frequency >= 11 && frequency < 13.5
+                            spindleTypes{i} = 'Slow';
+                        elseif frequency >= 13.5 && frequency <= 16
+                            spindleTypes{i} = 'Fast';
+                        else
+                            spindleTypes{i} = 'Atypical';
+                        end
+                    end
+                else
+                    spindleTypes{i} = 'Unknown';
+                end
+            end
+        end
     end
 
     methods (Access = private)
         function loadHypnogram(obj)
-            % Load hypnogram using same method as SpectralTrainClass
             try
                 fprintf('Loading hypnogram: %s\n', obj.xmlPath);
                 
-                % Check if file exists
                 if ~exist(obj.xmlPath, 'file')
                     warning('XML file not found: %s', obj.xmlPath);
                     obj.numericHypnogram = [];
-                    obj.stage2Mask = [];
-                    obj.stage3Mask = [];
                     return;
                 end
                 
@@ -304,15 +788,12 @@ end
             catch ME
                 warning('Hypnogram loading failed: %s', ME.message);
                 obj.numericHypnogram = [];
-                obj.stage2Mask = [];
-                obj.stage3Mask = [];
             end
         end
         
         function setupMappedChannels(obj)
-            fprintf('Setting up channels using ChannelMappingHelper...\n');
+            fprintf('Setting up channels...\n');
             
-            % Get raw channel names
             rawChannelNames = obj.edfLoader.signal_labels;
             
             fprintf('Raw channel names from EDF:\n');
@@ -320,44 +801,27 @@ end
                 fprintf('  Channel %d: "%s"\n', i, rawChannelNames{i});
             end
             
-            % Map to uniform names using helper function
             mappedNames = ChannelMappingHelper(rawChannelNames);
-            obj.mappedChannelNames = rawChannelNames; % Keep original names
-            
-            % Use mapped names for channel selection
+            obj.mappedChannelNames = rawChannelNames;
             obj.channelLabels = mappedNames;
             
-            % Load all data - keep in cell array format
             obj.data = obj.loadEDFData(1:length(rawChannelNames));
-            
-            % Get sampling rate
             obj.fs = obj.getSamplingRate(1);
             
-            fprintf('Mapped %d channels: %s\n', length(obj.channelLabels), strjoin(obj.channelLabels, ', '));
+            fprintf('Mapped %d channels\n', length(obj.channelLabels));
             fprintf('Sampling rate: %.1f Hz\n', obj.fs);
-            fprintf('Data loaded for all channels\n');
         end
 
         function data = loadEDFData(obj, channelIndices)
-            % Load data and keep in cell array format to handle different sizes
             fprintf('Loading data for %d channels...\n', length(channelIndices));
             
             try
-                % Use signalCell directly - don't convert to matrix
                 signalCell = obj.edfLoader.edf.signalCell;
-                fprintf('Found signalCell with %d channels\n', length(signalCell));
-                
-                % Check dimensions of first channel
-                testData = signalCell{1};
-                fprintf('First channel dimensions: %s\n', mat2str(size(testData)));
-                
-                % Keep data in cell array format to handle column vectors
                 data = cell(1, length(channelIndices));
                 
                 for i = 1:length(channelIndices)
                     channelData = signalCell{channelIndices(i)};
-                    data{i} = double(channelData); % Convert to double but keep original shape
-                    fprintf('  Channel %d: %s samples\n', i, mat2str(size(data{i})));
+                    data{i} = double(channelData);
                 end
                 
                 fprintf('Successfully loaded data for %d channels\n', length(data));
@@ -369,18 +833,15 @@ end
         end
 
         function fs = getSamplingRate(obj, channelIndex)
-            % Get sampling rate
             try
                 sr = obj.edfLoader.sample_rate;
                 if isnumeric(sr) && length(sr) >= channelIndex
                     fs = sr(channelIndex);
                 else
-                    fs = 256; % Default based on your data
+                    fs = 256;
                 end
-                fprintf('Sampling rate: %.1f Hz\n', fs);
             catch
                 fs = 256;
-                fprintf('Using default sampling rate: %.1f Hz\n', fs);
             end
         end
 
@@ -397,148 +858,291 @@ end
             if isfield(p,'threshold'), dp.threshold = p.threshold; end
             if isfield(p,'minInterval'), dp.minInterval = p.minInterval; end
             obj.detectionParams = dp;
-            
-            fprintf('Detection parameters:\n');
-            fprintf('  Frequency band: %.1f-%.1f Hz\n', dp.freqBand(1), dp.freqBand(2));
-            fprintf('  Duration range: %.1f-%.1f s\n', dp.duration(1), dp.duration(2));
-            fprintf('  RMS window: %.1f s\n', dp.rmsWin);
-            fprintf('  Threshold: %.1f SD\n', dp.threshold);
         end
 
-        function events = detectSpindlesOnChannel(obj, x, channelName, just2)
-            fs = obj.fs;
-            dp = obj.detectionParams;
-
-            % Ensure x is a row vector for processing
-            if size(x, 1) > size(x, 2)
-                x = x'; % Transpose if it's a column vector
+        function SO_events = detectSlowOscillations(obj)
+            % Detect slow oscillations using Mölle et al. method - NREM sleep only
+            SO_events = [];
+            
+            frontal_SO_channels = {'F3-M2', 'F4-M1', 'F3', 'F4', 'Fz'};
+            
+            available_channels = {};
+            for ch = 1:length(frontal_SO_channels)
+                if any(strcmp(obj.channelLabels, frontal_SO_channels{ch}))
+                    available_channels{end+1} = frontal_SO_channels{ch};
+                end
             end
-            x = double(x);
             
-            fprintf('  Channel %s: %.1f seconds, %d samples\n', ...
-                channelName, length(x)/fs, length(x));
-
-            % Remove mean
-            x = x - mean(x);
+            if isempty(available_channels)
+                available_channels = obj.channelLabels(1:min(8, length(obj.channelLabels)));
+            end
             
-            % Apply stage restriction if requested
-            if just2 && ~isempty(obj.numericHypnogram)
-                % Expand hypnogram to match signal length
-                samplesPerEpoch = 30 * fs;
-                numCompleteEpochs = floor(length(x) / samplesPerEpoch);
+            for ch = 1:length(available_channels)
+                channelName = available_channels{ch};
+                chIdx = find(strcmp(obj.channelLabels, channelName));
+                if isempty(chIdx), continue; end
                 
-                if numCompleteEpochs > 0
-                    % Create stage mask for the signal
-                    stageMask = false(1, length(x));
-                    for epoch = 1:min(numCompleteEpochs, length(obj.numericHypnogram))
-                        if obj.numericHypnogram(epoch) == 2
+                x = obj.data{chIdx};
+                if isempty(x), continue; end
+                
+                % Apply NREM sleep mask (stages 2, 3, 4)
+                if ~isempty(obj.numericHypnogram)
+                    samplesPerEpoch = 30 * obj.fs;
+                    nremMask = false(1, length(x));
+                    
+                    for epoch = 1:min(length(obj.numericHypnogram), ceil(length(x)/samplesPerEpoch))
+                        stageNum = obj.numericHypnogram(epoch);
+                        if stageNum == 2 || stageNum == 3 || stageNum == 4 % NREM sleep only
                             startSample = (epoch-1) * samplesPerEpoch + 1;
                             endSample = min(epoch * samplesPerEpoch, length(x));
-                            stageMask(startSample:endSample) = true;
+                            nremMask(startSample:endSample) = true;
                         end
                     end
-                    % Zero out non-stage2 data
-                    x(~stageMask) = 0;
+                    x = x(nremMask);
                 end
-            end
-            
-            % Bandpass filter
-            try
-                [b,a] = butter(2, dp.freqBand/(fs/2), 'bandpass');
-                xf = filtfilt(b, a, x);
-            catch ME
-                fprintf('  Filter error: %s. Using original signal.\n', ME.message);
-                xf = x;
-            end
-
-            % RMS envelope
-            win = round(dp.rmsWin * fs);
-            if mod(win,2) == 0
-                win = win + 1;
-            end
-            if win > length(xf) || win < 3
-                fprintf('  Signal too short for RMS calculation\n');
-                events = [];
-                return;
-            end
-            
-            try
-                rms_env = sqrt(conv(xf.^2, ones(win,1)/win, 'same'));
-            catch
-                fprintf('  RMS calculation failed\n');
-                events = [];
-                return;
-            end
-
-            % Normalize RMS (z-score)
-            rms_z = (rms_env - mean(rms_env)) / std(rms_env);
-
-            % Thresholding - use 95th percentile
-            if just2 && ~isempty(obj.stage2Mask)
-                % Use only stage 2 data for threshold calculation
-                samplesPerEpoch = 30 * fs;
-                numCompleteEpochs = floor(length(rms_z) / samplesPerEpoch);
                 
-                stage2RMS = [];
-                for epoch = 1:min(numCompleteEpochs, length(obj.stage2Mask))
-                    if obj.stage2Mask(epoch)
-                        startSample = (epoch-1) * samplesPerEpoch + 1;
-                        endSample = min(epoch * samplesPerEpoch, length(rms_z));
-                        stage2RMS = [stage2RMS, rms_z(startSample:endSample)];
+                % Clean data - remove NaN/Inf values
+                x = x(isfinite(x));
+                if isempty(x) || length(x) < obj.fs * 10
+                    continue;
+                end
+                
+                % Low-pass filter 30 Hz
+                [b,a] = butter(2, 30/(obj.fs/2), 'low');
+                x_lp = filtfilt(b, a, x);
+                
+                % 3.5 Hz low-pass filter for SO detection
+                [b,a] = butter(2, 3.5/(obj.fs/2), 'low');
+                x_so = filtfilt(b, a, x_lp);
+                
+                % Find positive-to-negative zero crossings
+                zero_crossings = find(diff(sign(x_so)) == -2);
+                
+                for i = 1:length(zero_crossings)-1
+                    start_idx = zero_crossings(i);
+                    end_idx = zero_crossings(i+1);
+                    
+                    duration = (end_idx - start_idx) / obj.fs;
+                    if duration < 0.9 || duration > 2.0
+                        continue;
+                    end
+                    
+                    segment = x_so(start_idx:end_idx);
+                    [neg_peak, neg_idx] = min(segment);
+                    [pos_peak, pos_idx] = max(segment);
+                    
+                    % Amplitude criteria (relaxed)
+                    if neg_peak < -40 && (pos_peak - neg_peak) >= 70
+                        peak_time = (start_idx + neg_idx - 1) / obj.fs;
+                        SO_events(end+1,:) = [peak_time, duration, neg_peak, chIdx];
                     end
                 end
-                
-                if ~isempty(stage2RMS) && std(stage2RMS) > 0
-                    thresh = prctile(stage2RMS, 95);
-                else
-                    thresh = prctile(rms_z, 95);
-                end
-            else
-                thresh = prctile(rms_z, 95);
             end
-
-            fprintf('  Detection threshold: %.2f SD\n', thresh);
-
-            above = rms_z > thresh;
+            
+            % Remove duplicates
+            if ~isempty(SO_events)
+                [~, unique_idx] = unique(SO_events(:,1), 'stable');
+                SO_events = SO_events(unique_idx, :);
+            end
+        end
+        
+        function [slow_spindles, fast_spindles] = detectSpindlesMolleMethod(obj, sleepOnly)
+            % Detect spindles with topography separation (Mölle method) - NREM sleep only
+            slow_spindle_channels = {'F3-M2', 'F4-M1', 'F3', 'F4', 'Fz'};
+            fast_spindle_channels = {'C3-M2', 'C4-M1', 'C3', 'C4', 'Cz', 'P3', 'P4', 'Pz'};
+            
+            % Find available channels
+            available_slow = {};
+            for ch = 1:length(slow_spindle_channels)
+                if any(strcmp(obj.channelLabels, slow_spindle_channels{ch}))
+                    available_slow{end+1} = slow_spindle_channels{ch};
+                end
+            end
+            
+            available_fast = {};
+            for ch = 1:length(fast_spindle_channels)
+                if any(strcmp(obj.channelLabels, fast_spindle_channels{ch}))
+                    available_fast{end+1} = fast_spindle_channels{ch};
+                end
+            end
+            
+            % Use Mölle paper frequencies
+            slow_peak_freq = 10.23;
+            fast_peak_freq = 13.40;
+            
+            slow_spindles = [];
+            fast_spindles = [];
+            
+            % Detect slow spindles in frontal channels
+            for ch = 1:length(available_slow)
+                channelName = available_slow{ch};
+                chIdx = find(strcmp(obj.channelLabels, channelName));
+                if isempty(chIdx), continue; end
+                
+                x = obj.data{chIdx};
+                spindles = obj.detectSpindlesSingleChannel(x, channelName, slow_peak_freq, chIdx, sleepOnly);
+                if ~isempty(spindles)
+                    slow_spindles = [slow_spindles; spindles];
+                end
+            end
+            
+            % Detect fast spindles in central-parietal channels
+            for ch = 1:length(available_fast)
+                channelName = available_fast{ch};
+                chIdx = find(strcmp(obj.channelLabels, channelName));
+                if isempty(chIdx), continue; end
+                
+                x = obj.data{chIdx};
+                spindles = obj.detectSpindlesSingleChannel(x, channelName, fast_peak_freq, chIdx, sleepOnly);
+                if ~isempty(spindles)
+                    fast_spindles = [fast_spindles; spindles];
+                end
+            end
+        end
+        
+        function events = detectSpindlesSingleChannel(obj, x, channelName, center_freq, chIdx, sleepOnly)
+            % Mölle method spindle detection for single channel - NREM sleep only
+            fs = obj.fs;
+            
+            % Clean data first
+            x = x(isfinite(x));
+            if isempty(x) || length(x) < fs * 10
+                events = [];
+                return;
+            end
+            
+            % Apply sleep restriction - Mölle method uses NREM sleep only (stages 2, 3, 4)
+            if sleepOnly && ~isempty(obj.numericHypnogram)
+                samplesPerEpoch = 30 * fs;
+                nremMask = false(1, length(x));
+                
+                for epoch = 1:min(length(obj.numericHypnogram), ceil(length(x)/samplesPerEpoch))
+                    stageNum = obj.numericHypnogram(epoch);
+                    if stageNum == 2 || stageNum == 3 || stageNum == 4 % NREM sleep only
+                        startSample = (epoch-1) * samplesPerEpoch + 1;
+                        endSample = min(epoch * samplesPerEpoch, length(x));
+                        nremMask(startSample:endSample) = true;
+                    end
+                end
+                x = x(nremMask);
+            end
+            
+            if isempty(x) || length(x) < fs * 10
+                events = [];
+                return;
+            end
+            
+            x = x - mean(x);
+            if size(x, 1) > size(x, 2)
+                x = x';
+            end
+            
+            % Bandpass filter ±1.5 Hz around center frequency
+            band_low = max(0.5, center_freq - 1.5);
+            band_high = min(fs/2-1, center_freq + 1.5);
+            
+            try
+                [b,a] = butter(2, [band_low, band_high]/(fs/2), 'bandpass');
+                xf = filtfilt(b, a, x);
+            catch
+                events = [];
+                return;
+            end
+            
+            % RMS with 0.2s moving window
+            win_samples = round(0.2 * fs);
+            if win_samples > length(xf)
+                events = [];
+                return;
+            end
+            
+            rms_env = sqrt(conv(xf.^2, ones(win_samples,1)/win_samples, 'same'));
+            
+            % Smooth RMS with 0.2s moving average
+            rms_smooth = conv(rms_env, ones(win_samples,1)/win_samples, 'same');
+            
+            % Remove any remaining NaN/Inf values
+            rms_smooth = rms_smooth(isfinite(rms_smooth));
+            if isempty(rms_smooth)
+                events = [];
+                return;
+            end
+            
+            % Threshold = 1.5 standard deviations
+            threshold = 1.5 * std(rms_smooth);
+            
+            % Find threshold crossings
+            above = rms_smooth > threshold;
             above = [false, above, false];
-
-            % Find transitions
+            
             d = diff(above);
             starts = find(d == 1);
             ends = find(d == -1) - 1;
-
-            if isempty(starts) || isempty(ends)
-                fprintf('  No spindle candidates found\n');
-                events = [];
-                return;
-            end
-
+            
             events = [];
             for i = 1:min(length(starts), length(ends))
                 s = starts(i);
                 e = ends(i);
-                if e <= s
-                    continue;
-                end
+                if e <= s, continue; end
+                
                 dur = (e - s) / fs;
-                if dur < dp.duration(1) || dur > dp.duration(2)
+                if dur < 0.5 || dur > 3.0
                     continue;
                 end
-                [~, pkIdx] = max(rms_env(s:e));
-                pk = s + pkIdx - 1;
-                events(end+1,:) = [s, e, pk, rms_env(pk), dur];
+                
+                if e > length(xf) || s > length(xf)
+                    continue;
+                end
+                
+                spindle_segment = xf(s:e);
+                [~, peak_idx] = min(spindle_segment);
+                peak_sample = s + peak_idx - 1;
+                
+                if peak_sample > length(rms_smooth)
+                    continue;
+                end
+                
+                % Calculate actual frequency
+                spindle_data = spindle_segment - mean(spindle_segment);
+                [pks, locs] = findpeaks(spindle_data, 'MinPeakHeight', std(spindle_data)*0.3);
+                
+                if length(locs) >= 2
+                    peak_intervals = diff(locs) / fs;
+                    frequency = 1 / mean(peak_intervals);
+                else
+                    frequency = center_freq;
+                end
+                
+                % Ensure frequency is within reasonable range
+                if frequency < 8 || frequency > 20
+                    frequency = center_freq;
+                end
+                
+                events(end+1,:) = [s/fs, e/fs, peak_sample/fs, rms_smooth(peak_sample), dur, frequency, chIdx];
             end
-
-            if isempty(events)
-                fprintf('  No spindles after duration filtering\n');
-                events = [];
+        end
+        
+        function analyzeTemporalRelationships(obj)
+            % Basic temporal relationship analysis
+            obj.temporalRelations = struct();
+            
+            if isempty(obj.SO_events) || (isempty(obj.slow_spindles) && isempty(obj.fast_spindles))
                 return;
             end
-
-            % Convert to seconds
-            events(:,1:3) = events(:,1:3) / fs;
             
-            fprintf('  Detected %d spindles\n', size(events,1));
+            SO_times = obj.SO_events(:,1);
+            
+            if ~isempty(obj.fast_spindles)
+                fast_times = obj.fast_spindles(:,3);
+                obj.temporalRelations.fast_spindle_count = length(fast_times);
+            end
+            
+            if ~isempty(obj.slow_spindles)
+                slow_times = obj.slow_spindles(:,3);
+                obj.temporalRelations.slow_spindle_count = length(slow_times);
+            end
+            
+            obj.temporalRelations.SO_count = length(SO_times);
         end
     end
 end

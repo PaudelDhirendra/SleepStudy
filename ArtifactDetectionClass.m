@@ -571,7 +571,7 @@ end
             % Apply artifact mask to single channel
             artifactSignalMask = obj.getArtifactMaskForSignal(channelData, fs, 30);
             cleanChannel = channelData;
-            cleanChannel(artifactSignalMask) = 0; % Zero out artifact periods
+            cleanChannel(artifactSignalMask) =  NaN; % ✅ Use NaN for explicit exclusion
         end
         
         function summary = getCleaningSummary(obj)
