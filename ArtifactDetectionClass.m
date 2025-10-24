@@ -100,22 +100,7 @@ classdef ArtifactDetectionClass < handle
     fprintf('Using ECG channel: %s (index %d)\n', signalLabels{ecgChannel}, ecgChannel);
 
 
-    % === ADDED: ECG QUALITY CHECK ===
-    % Extract ECG signal for quality check
-    if iscell(data)
-        ecgSignalForCheck = data{ecgChannel};
-    else
-        ecgSignalForCheck = data(ecgChannel, :);
-    end
-    
-    % Check ECG quality before proceeding
-    if ~obj.checkECGQuality(ecgSignalForCheck, fs)
-        fprintf('ECG quality check failed - skipping decontamination\n');
-        obj.ecgDecontaminationApplied = false;
-        cleanData = data;
-        return;
-    end
-    % === END OF QUALITY CHECK ===
+
     
     % Handle both cell array and matrix formats consistently
     isCellData = iscell(data);
