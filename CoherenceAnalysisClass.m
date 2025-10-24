@@ -55,6 +55,7 @@ classdef CoherenceAnalysisClass < handle
         function runAnalysis(obj, pairs)
             fprintf('Starting coherence analysis with targeted data cleaning...\n');
             
+            % Extract all unique channels from pairs
             allChannels = {};
             for i = 1:length(pairs)
                 channelNames = strsplit(pairs{i}, '-');
@@ -72,38 +73,42 @@ classdef CoherenceAnalysisClass < handle
                 fprintf('  %d: "%s"\n', i, allChannels{i});
             end
             
+            % IMPROVED CHANNEL MATCHING FOR BIPOLAR MONTAGE
             eegChannelIndices = [];
             eegChannelNames = {};
             
             for ch = 1:length(allChannels)
                 channelName = strtrim(allChannels{ch});
-                chIdx = find(strcmpi(obj.mappedChannelNames, channelName), 1);
+                chIdx = obj.findBipolarChannelIndex(channelName);
                 
                 if ~isempty(chIdx)
                     eegChannelIndices(end+1) = chIdx;
                     eegChannelNames{end+1} = obj.mappedChannelNames{chIdx};
-                    fprintf('Matched channel: "%s" -> "%s" (index %d)\n', channelName, obj.mappedChannelNames{chIdx}, chIdx);
+                    fprintf('SUCCESS: Matched channel: "%s" -> "%s" (index %d)\n', channelName, obj.mappedChannelNames{chIdx}, chIdx);
                 else
                     fprintf('WARNING: Could not find channel: "%s"\n', channelName);
+                    fprintf('  Available channels: %s\n', strjoin(obj.mappedChannelNames, ', '));
                 end
             end
             
             if isempty(eegChannelIndices)
-                warning('No specified channels found for analysis');
-                return;
+                error('No specified channels found for analysis. Available channels: %s', strjoin(obj.mappedChannelNames, ', '));
             end
             
             fprintf('Targeted cleaning for %d EEG channels: %s\n', ...
                 length(eegChannelIndices), strjoin(eegChannelNames, ', '));
             
+            % Perform comprehensive artifact detection and cleaning
             [cleanData, artifactInfo] = obj.performTargetedCleaning(eegChannelIndices, eegChannelNames);
             
+            % Update the main data with cleaned data
             for i = 1:length(eegChannelIndices)
                 obj.data{eegChannelIndices(i)} = cleanData{i};
             end
             
             obj.cleaningSummary = obj.artifactDetector.getCleaningSummary();
             
+            % Initialize results structure
             obj.coherenceResults = struct();
             obj.coherenceResults.pairs = pairs;
             obj.coherenceResults.coherence = struct();
@@ -111,6 +116,8 @@ classdef CoherenceAnalysisClass < handle
             obj.coherenceResults.sleepPeriods = struct();
             obj.coherenceResults.analysisParameters = obj.coherenceParams;
             
+            % Perform coherence analysis for each pair
+            successfulPairs = 0;
             for i = 1:length(pairs)
                 pair = pairs{i};
                 channelNames = strsplit(pair, '-');
@@ -119,109 +126,398 @@ classdef CoherenceAnalysisClass < handle
                     ch1 = strtrim(channelNames{1});
                     ch2 = strtrim(channelNames{2});
                     
-                    idx1 = find(strcmp(obj.mappedChannelNames, ch1), 1);
-                    idx2 = find(strcmp(obj.mappedChannelNames, ch2), 1);
+                    % Find channel indices using bipolar matching
+                    idx1 = obj.findBipolarChannelIndex(ch1);
+                    idx2 = obj.findBipolarChannelIndex(ch2);
                     
                     if ~isempty(idx1) && ~isempty(idx2)
                         fprintf('Analyzing coherence pair: %s - %s\n', ch1, ch2);
+                        fprintf('  Using actual channels: %s - %s\n', obj.mappedChannelNames{idx1}, obj.mappedChannelNames{idx2});
                         
-                        if ~isempty(obj.numericHypnogram)
-                            obj.calculateSleepPeriodCoherence(idx1, idx2, pair);
-                        else
-                            globalCoherence = obj.calculateComprehensiveCoherence(idx1, idx2);
-                            obj.coherenceResults.coherence.(obj.sanitizeFieldName(pair)) = globalCoherence;
-                        end
+if ~isempty(obj.numericHypnogram)
+    obj.calculateSleepPeriodCoherence(idx1, idx2, pair);
+end
                         
                         if ~isempty(obj.numericHypnogram)
                             obj.calculateStageSpecificCoherence(idx1, idx2, pair);
+                             obj.calculateSleepCycleCoherence(idx1, idx2, pair);
                         end
+                        
+                        successfulPairs = successfulPairs + 1;
                     else
                         fprintf('WARNING: Pair %s not found in data (ch1: %s, ch2: %s)\n', pair, ch1, ch2);
+                        if isempty(idx1)
+                            fprintf('  Could not find channel: %s\n', ch1);
+                        end
+                        if isempty(idx2)
+                            fprintf('  Could not find channel: %s\n', ch2);
+                        end
                     end
                 else
-                    fprintf('WARNING: Invalid pair format: %s\n', pair);
+                    fprintf('WARNING: Invalid pair format: %s (should be "channel1-channel2")\n', pair);
                 end
             end
             
-            fprintf('Coherence analysis completed for %d pairs\n', length(pairs));
-            obj.printSummaryStatistics();
+            fprintf('Coherence analysis completed for %d/%d pairs\n', successfulPairs, length(pairs));
+            if successfulPairs > 0
+                obj.printSummaryStatistics();
+            else
+                warning('No pairs were successfully analyzed');
+            end
+        end
+
+        function channelIdx = findBipolarChannelIndex(obj, channelName)
+            % SPECIALIZED MATCHING FOR BIPOLAR MONTAGE
+            % Handles cases where pairs are like "F3-F4" but actual channels are "F3-M2", "F4-M1"
+            
+            channelName = strtrim(channelName);
+            
+            % Common bipolar montage mappings
+            bipolarMappings = {
+                'F3', {'F3-M2', 'EEG F3-A2', 'F3'};
+                'F4', {'F4-M1', 'EEG F4-A1', 'F4'};
+                'C3', {'C3-M2', 'EEG C3-A2', 'C3'};
+                'C4', {'C4-M1', 'EEG C4-A1', 'C4'};
+                'O1', {'O1-M2', 'EEG O1-A2', 'O1'};
+                'O2', {'O2-M1', 'EEG O2-A1', 'O2'};
+                'FZ', {'FZ', 'EEG FZ'};
+                'CZ', {'CZ', 'EEG CZ'};
+                'PZ', {'PZ', 'EEG PZ'};
+                'OZ', {'OZ', 'EEG OZ'};
+                };
+            
+            % First try exact mapping from bipolar table
+            for m = 1:size(bipolarMappings, 1)
+                if strcmpi(bipolarMappings{m, 1}, channelName)
+                    possibleNames = bipolarMappings{m, 2};
+                    for p = 1:length(possibleNames)
+                        channelIdx = find(strcmpi(obj.mappedChannelNames, possibleNames{p}), 1);
+                        if ~isempty(channelIdx)
+                            return;
+                        end
+                    end
+                end
+            end
+            
+            % Strategy 1: Exact match (case-insensitive)
+            channelIdx = find(strcmpi(obj.mappedChannelNames, channelName), 1);
+            if ~isempty(channelIdx), return; end
+            
+            % Strategy 2: Channel starts with the requested name
+            for j = 1:length(obj.mappedChannelNames)
+                if startsWith(obj.mappedChannelNames{j}, channelName)
+                    channelIdx = j;
+                    return;
+                end
+            end
+            
+            % Strategy 3: Channel contains the requested name
+            for j = 1:length(obj.mappedChannelNames)
+                if contains(obj.mappedChannelNames{j}, channelName)
+                    channelIdx = j;
+                    return;
+                end
+            end
+            
+            % Strategy 4: Common variations with references
+            variations = {
+                channelName, ...
+                [channelName '-M2'], ...
+                [channelName '-M1'], ...
+                [channelName '-A2'], ...
+                [channelName '-A1'], ...
+                ['EEG ' channelName '-A2'], ...
+                ['EEG ' channelName '-A1'], ...
+                ['EEG ' channelName]
+                };
+            
+            for v = 1:length(variations)
+                channelIdx = find(strcmpi(obj.mappedChannelNames, variations{v}), 1);
+                if ~isempty(channelIdx)
+                    return;
+                end
+            end
+            
+            % Final fallback: return empty
+            channelIdx = [];
         end
 
         function saveResults(obj, outputFile)
-            if isempty(obj.coherenceResults)
-                error('No results to save. Run analysis first.');
-            end
-            
-            fprintf('Saving coherence results to: %s\n', outputFile);
-            
-            if exist(outputFile, 'file')
-                delete(outputFile);
-            end
-            
-            resultsTable = obj.createComprehensiveResultsTable();
-            writetable(resultsTable, outputFile, 'Sheet', 'Coherence_Results');
-            
-            if ~isempty(obj.cleaningSummary)
-                qualityData = {
-                    'Total_Recording_Time_min', length(obj.allChannelData{1}) / obj.fs(1) / 60;
-                    'Clean_Data_Percent', obj.cleaningSummary.cleanDataPercentage;
-                    'Artifact_Percent', obj.cleaningSummary.artifactPercentage;
-                    'ECG_Decontamination_Applied', obj.cleaningSummary.ecgDecontaminationApplied;
-                    'Total_Artifacts', obj.cleaningSummary.totalArtifacts;
-                    };
-                qualityTable = cell2table(qualityData, 'VariableNames', {'Parameter', 'Value'});
-                writetable(qualityTable, outputFile, 'Sheet', 'Data_Quality');
-            end
-            
-            paramData = {
-                'Window_Length_sec', obj.coherenceParams.windowLength;
-                'Window_Overlap_Percent', obj.coherenceParams.overlap * 100;
-                'Minimum_Data_Length_sec', obj.coherenceParams.minDataLength;
-                'Frequency_Range_Min_Hz', obj.coherenceParams.freqRange(1);
-                'Frequency_Range_Max_Hz', obj.coherenceParams.freqRange(2);
-                'NFFT_Size', obj.coherenceParams.nfft;
-                };
-            paramTable = cell2table(paramData, 'VariableNames', {'Parameter', 'Value'});
-            writetable(paramTable, outputFile, 'Sheet', 'Analysis_Parameters');
-            
-            fprintf('SUCCESS: Saved comprehensive coherence results to: %s\n', outputFile);
+    if isempty(obj.coherenceResults)
+        error('No results to save. Run analysis first.');
+    end
+    
+    fprintf('Saving coherence results to: %s\n', outputFile);
+    
+    if exist(outputFile, 'file')
+        delete(outputFile);
+    end
+    
+    % Get comprehensive table
+    resultsTable = obj.createComprehensiveResultsTable();
+    
+    % Save different analysis types in separate sheets
+    if height(resultsTable) > 0
+        % Global results
+        globalMask = strcmp(resultsTable.AnalysisType, 'Global');
+        if any(globalMask)
+            writetable(resultsTable(globalMask, :), outputFile, 'Sheet', 'Global_Coherence');
         end
         
-        function printSummaryStatistics(obj)
-            if isempty(obj.coherenceResults)
-                return;
+        % Sleep period results
+        periodMask = strcmp(resultsTable.AnalysisType, 'SleepPeriod');
+        if any(periodMask)
+            writetable(resultsTable(periodMask, :), outputFile, 'Sheet', 'Sleep_Periods');
+        end
+        
+        % Sleep stage results
+        stageMask = strcmp(resultsTable.AnalysisType, 'SleepStage');
+        if any(stageMask)
+            writetable(resultsTable(stageMask, :), outputFile, 'Sheet', 'Sleep_Stages');
+        end
+
+        % In saveResults method, after other writetable calls, add:
+cycleMask = strcmp(resultsTable.AnalysisType, 'SleepCycle');
+if any(cycleMask)
+    writetable(resultsTable(cycleMask, :), outputFile, 'Sheet', 'Sleep_Cycles');
+end
+        
+        % All results combined
+        writetable(resultsTable, outputFile, 'Sheet', 'All_Results');
+    end
+    
+    % Calculate and save network composites
+    networkData = obj.calculateNetworkComposites();
+    if ~isempty(networkData)
+        writetable(networkData, outputFile, 'Sheet', 'Network_Composites');
+    end
+    
+    % Save data quality and parameters (your existing code)
+    if ~isempty(obj.cleaningSummary)
+        qualityData = {
+            'Total_Recording_Time_min', length(obj.allChannelData{1}) / obj.fs(1) / 60;
+            'Clean_Data_Percent', obj.cleaningSummary.cleanDataPercentage;
+            'Artifact_Percent', obj.cleaningSummary.artifactPercentage;
+            'ECG_Decontamination_Applied', obj.cleaningSummary.ecgDecontaminationApplied;
+            'Total_Artifacts', obj.cleaningSummary.totalArtifacts;
+            };
+        qualityTable = cell2table(qualityData, 'VariableNames', {'Parameter', 'Value'});
+        writetable(qualityTable, outputFile, 'Sheet', 'Data_Quality');
+    end
+    
+    paramData = {
+        'Window_Length_sec', obj.coherenceParams.windowLength;
+        'Window_Overlap_Percent', obj.coherenceParams.overlap * 100;
+        'Minimum_Data_Length_sec', obj.coherenceParams.minDataLength;
+        'Frequency_Range_Min_Hz', obj.coherenceParams.freqRange(1);
+        'Frequency_Range_Max_Hz', obj.coherenceParams.freqRange(2);
+        'NFFT_Size', obj.coherenceParams.nfft;
+        };
+    paramTable = cell2table(paramData, 'VariableNames', {'Parameter', 'Value'});
+    writetable(paramTable, outputFile, 'Sheet', 'Analysis_Parameters');
+    
+    fprintf('SUCCESS: Saved comprehensive coherence results to: %s\n', outputFile);
+end
+        
+function printSummaryStatistics(obj)
+    if isempty(obj.coherenceResults)
+        return;
+    end
+    
+    fprintf('\n=== COHERENCE ANALYSIS SUMMARY ===\n');
+    fprintf('Pairs analyzed: %s\n', strjoin(obj.coherenceResults.pairs, ', '));
+    
+    if ~isempty(obj.cleaningSummary)
+        fprintf('Data quality: %.1f%% clean data\n', obj.cleaningSummary.cleanDataPercentage);
+        fprintf('Artifact contamination: %.1f%%\n', obj.cleaningSummary.artifactPercentage);
+    end
+    
+    if ~isempty(obj.coherenceResults.pairs)
+        firstPair = obj.coherenceResults.pairs{1};
+        sanitizedPair = obj.sanitizeFieldName(firstPair);
+        
+        % REPLACED: Use SPT instead of Global coherence
+        if isfield(obj.coherenceResults.sleepPeriods, sanitizedPair) && ...
+           isfield(obj.coherenceResults.sleepPeriods.(sanitizedPair), 'SPT')
+            coherenceData = obj.coherenceResults.sleepPeriods.(sanitizedPair).SPT;
+            
+            fprintf('\n=== COHERENCE METRICS FOR %s (SPT) ===\n', firstPair);
+            fprintf('SPT Mean Coherence: %.3f\n', coherenceData.meanCoherence);
+            fprintf('Peak Coherence: %.3f at %.1f Hz\n', ...
+                coherenceData.peakCoherence, coherenceData.peakFrequency);
+            
+            fprintf('Band Coherence:\n');
+            fprintf('  Delta (1-4 Hz): %.3f\n', coherenceData.bandCoherence.Delta);
+            fprintf('  Theta (4-8 Hz): %.3f\n', coherenceData.bandCoherence.Theta);
+            fprintf('  Alpha (8-12 Hz): %.3f\n', coherenceData.bandCoherence.Alpha);
+            fprintf('  Sigma (12-15 Hz): %.3f\n', coherenceData.bandCoherence.Sigma);
+            fprintf('  Beta (15-30 Hz): %.3f\n', coherenceData.bandCoherence.Beta);
+            fprintf('  Gamma (30-45 Hz): %.3f\n', coherenceData.bandCoherence.Gamma);
+        else
+            fprintf('\nNo SPT coherence data available for summary\n');
+        end
+    end
+end
+
+
+
+        function network_data = calculateNetworkComposites(obj)
+    % Calculate network-level composite coherence measures
+    % Returns a table with network composites for each analysis type
+    
+    if isempty(obj.coherenceResults)
+        network_data = [];
+        return;
+    end
+    
+    fprintf('Calculating network composites...\n');
+    
+    % Define network configurations
+    networks = {
+        'InterHemispheric', {'F3-F4', 'C3-C4', 'O1-O2'};
+        'AnteriorPosterior', {'F3-C3', 'F4-C4'};
+        'CentralOccipital', {'C3-O1', 'C4-O2'};
+        'Frontal', {'F3-F4'};
+        'Central', {'C3-C4'};
+        'Occipital', {'O1-O2'};
+        };
+    
+    % Get all available analysis types and stages
+    analysisTypes = {'SleepPeriod', 'SleepStage'};
+    allStages = {};
+    
+    % Collect all unique stages
+    for i = 1:length(obj.coherenceResults.pairs)
+        pair = obj.coherenceResults.pairs{i};
+        sanitizedPair = obj.sanitizeFieldName(pair);
+        
+        % Check sleep periods
+        if isfield(obj.coherenceResults.sleepPeriods, sanitizedPair)
+            periods = fieldnames(obj.coherenceResults.sleepPeriods.(sanitizedPair));
+            allStages = union(allStages, periods);
+        end
+        
+        % Check sleep stages
+        if isfield(obj.coherenceResults.sleepStages, sanitizedPair)
+            stages = fieldnames(obj.coherenceResults.sleepStages.(sanitizedPair));
+            allStages = union(allStages, stages);
+        end
+    end
+    allStages = union({'Global'}, allStages);
+    
+    % Initialize results table
+    networkRows = {};
+    
+    for netIdx = 1:size(networks, 1)
+        networkName = networks{netIdx, 1};
+        requiredPairs = networks{netIdx, 2};
+        
+        fprintf('  Calculating %s network from pairs: %s\n', ...
+            networkName, strjoin(requiredPairs, ', '));
+        
+        for stageIdx = 1:length(allStages)
+            stage = allStages{stageIdx};
+            
+            % Determine analysis type
+            if strcmp(stage, 'Global')
+                analysisType = 'Global';
+            elseif ismember(stage, {'SPT', 'TST', 'WASO'})
+                analysisType = 'SleepPeriod';
+            else
+                analysisType = 'SleepStage';
             end
             
-            fprintf('\n=== COHERENCE ANALYSIS SUMMARY ===\n');
-            fprintf('Pairs analyzed: %s\n', strjoin(obj.coherenceResults.pairs, ', '));
+            % Collect coherence values for all pairs in this network
+            coherenceValues = [];
+            bandCoherence = struct();
+            hasValidData = false;
             
-            if ~isempty(obj.cleaningSummary)
-                fprintf('Data quality: %.1f%% clean data\n', obj.cleaningSummary.cleanDataPercentage);
-                fprintf('Artifact contamination: %.1f%%\n', obj.cleaningSummary.artifactPercentage);
-            end
-            
-            if ~isempty(obj.coherenceResults.pairs)
-                firstPair = obj.coherenceResults.pairs{1};
-                sanitizedPair = obj.sanitizeFieldName(firstPair);
+            for pairIdx = 1:length(requiredPairs)
+                pair = requiredPairs{pairIdx};
+                sanitizedPair = obj.sanitizeFieldName(pair);
                 
-                if isfield(obj.coherenceResults.coherence, sanitizedPair)
-                    coherenceData = obj.coherenceResults.coherence.(sanitizedPair);
+                % Get coherence data for this pair and stage
+                cohData = obj.getCoherenceDataForStage(sanitizedPair, analysisType, stage);
+                
+                if ~isempty(cohData)
+                    coherenceValues(end+1) = cohData.meanCoherence;
+                    hasValidData = true;
                     
-                    fprintf('\n=== COHERENCE METRICS FOR %s ===\n', firstPair);
-                    fprintf('Global Mean Coherence: %.3f\n', coherenceData.meanCoherence);
-                    fprintf('Peak Coherence: %.3f at %.1f Hz\n', ...
-                        coherenceData.peakCoherence, coherenceData.peakFrequency);
-                    
-                    fprintf('Band Coherence:\n');
-                    fprintf('  Delta (1-4 Hz): %.3f\n', coherenceData.bandCoherence.Delta);
-                    fprintf('  Theta (4-8 Hz): %.3f\n', coherenceData.bandCoherence.Theta);
-                    fprintf('  Alpha (8-12 Hz): %.3f\n', coherenceData.bandCoherence.Alpha);
-                    fprintf('  Sigma (12-15 Hz): %.3f\n', coherenceData.bandCoherence.Sigma);
-                    fprintf('  Beta (15-30 Hz): %.3f\n', coherenceData.bandCoherence.Beta);
-                    fprintf('  Gamma (30-45 Hz): %.3f\n', coherenceData.bandCoherence.Gamma);
+                    % Accumulate band coherence
+                    if isfield(cohData, 'bandCoherence')
+                        bands = fieldnames(cohData.bandCoherence);
+                        for b = 1:length(bands)
+                            band = bands{b};
+                            if ~isfield(bandCoherence, band)
+                                bandCoherence.(band) = [];
+                            end
+                            bandCoherence.(band)(end+1) = cohData.bandCoherence.(band);
+                        end
+                    end
                 end
             end
+            
+            if hasValidData && ~isempty(coherenceValues)
+                % Calculate network composite
+                networkRow = struct();
+                networkRow.Network = networkName;
+                networkRow.AnalysisType = analysisType;
+                networkRow.SleepStage = stage;
+                networkRow.MeanCoherence = mean(coherenceValues);
+                networkRow.StdCoherence = std(coherenceValues);
+                networkRow.NumPairs = length(coherenceValues);
+                networkRow.PairsUsed = strjoin(requiredPairs, '; ');
+                
+                % Calculate mean band coherence
+                bands = fieldnames(bandCoherence);
+                for b = 1:length(bands)
+                    band = bands{b};
+                    if ~isempty(bandCoherence.(band))
+                        networkRow.(['Coherence_' band]) = mean(bandCoherence.(band));
+                    else
+                        networkRow.(['Coherence_' band]) = NaN;
+                    end
+                end
+                
+                networkRows{end+1} = networkRow;
+                fprintf('    %s - %s: mean coherence = %.3f (%d pairs)\n', ...
+                    networkName, stage, networkRow.MeanCoherence, networkRow.NumPairs);
+            end
         end
+    end
+    
+    % Convert to table
+    if ~isempty(networkRows)
+        network_data = struct2table([networkRows{:}]);
+    else
+        network_data = table();
+        fprintf('    No network composites could be calculated\n');
+    end
+end
+
+function cohData = getCoherenceDataForStage(obj, sanitizedPair, analysisType, stage)
+    % Helper function to get coherence data for specific analysis type and stage
+    cohData = [];
+    
+    switch analysisType
+        case 'Global'
+            if isfield(obj.coherenceResults.coherence, sanitizedPair)
+                cohData = obj.coherenceResults.coherence.(sanitizedPair);
+            end
+            
+        case 'SleepPeriod'
+            if isfield(obj.coherenceResults.sleepPeriods, sanitizedPair) && ...
+               isfield(obj.coherenceResults.sleepPeriods.(sanitizedPair), stage)
+                cohData = obj.coherenceResults.sleepPeriods.(sanitizedPair).(stage);
+            end
+            
+        case 'SleepStage'
+            if isfield(obj.coherenceResults.sleepStages, sanitizedPair) && ...
+               isfield(obj.coherenceResults.sleepStages.(sanitizedPair), stage)
+                cohData = obj.coherenceResults.sleepStages.(sanitizedPair).(stage);
+            end
+    end
+end
     end
 
     methods (Access = private)
@@ -357,7 +653,6 @@ classdef CoherenceAnalysisClass < handle
             params.coherenceThreshold = 0.5;
             params.confidenceLevel = 0.95;
             params.nfft = 1024;
-            params.frequencyResolution = obj.fs(1) / params.nfft;
         end
         
         function [cleanData, artifactInfo] = performTargetedCleaning(obj, eegChannelIndices, eegChannelNames)
@@ -450,8 +745,7 @@ classdef CoherenceAnalysisClass < handle
                     wasoCoherence.meanCoherence, wasoCoherence.dataLength/60);
             end
             
-            globalCoherence = obj.calculateComprehensiveCoherence(idx1, idx2);
-            obj.coherenceResults.coherence.(sanitizedPair) = globalCoherence;
+
         end
         
         function sptMask = createSPTMask(obj, totalSamples)
@@ -749,160 +1043,243 @@ classdef CoherenceAnalysisClass < handle
             end
         end
 
-        function result = calculateCoherenceForData(obj, data1, data2, fs)
-            minLength = min(length(data1), length(data2));
-            data1 = data1(1:minLength)';
-            data2 = data2(1:minLength)';
-            
-            validMask = ~isnan(data1) & ~isnan(data2);
-            data1 = data1(validMask);
-            data2 = data2(validMask);
-            
-            windowLength = obj.coherenceParams.windowLength * fs;
-            overlap = obj.coherenceParams.overlap;
-            nfft = obj.coherenceParams.nfft;
-            
-            [cxy, f] = mscohere(data1, data2, hamming(windowLength), ...
-                round(overlap * windowLength), nfft, fs);
-            
-            freqMask = f >= obj.coherenceParams.freqRange(1) & f <= obj.coherenceParams.freqRange(2);
-            f = f(freqMask);
-            cxy = cxy(freqMask);
-            
-            result = struct();
-            result.frequencies = f;
-            result.coherence = cxy;
-            result.meanCoherence = mean(cxy);
-            result.medianCoherence = median(cxy);
-            result.stdCoherence = std(cxy);
-            result.coherenceVariance = var(cxy);
-            [result.peakCoherence, peakIdx] = max(cxy);
-            result.peakFrequency = f(peakIdx);
-            result.coherenceBandwidth = obj.calculateBandwidth(cxy, f);
-            result.coherenceArea = trapz(f, cxy);
-            result.dominantFrequency = sum(f .* cxy) / sum(cxy);
-            result.spectralEntropy = obj.calculateSpectralEntropy(cxy);
-            result.bandCoherence = obj.calculateBandCoherence(cxy, f);
-            result.coherenceRatios = obj.calculateCoherenceRatios(result.bandCoherence);
-            result.dataLength = length(data1) / fs;
-            result.validWindows = length(cxy);
+
+        function calculateSleepCycleCoherence(obj, idx1, idx2, pairName)
+    if isempty(obj.numericHypnogram)
+        return;
+    end
+    
+    try
+        % Use your existing sleep_cycles function
+        cycles_vector = sleep_cycles(obj.numericHypnogram);
+        
+        % Extract cycle start and end epochs from the vector
+        unique_cycles = unique(cycles_vector);
+        unique_cycles = unique_cycles(unique_cycles > 0); % Remove zeros
+        
+        if isempty(unique_cycles)
+            fprintf('  No sleep cycles detected\n');
+            return;
         end
         
-        function resultsTable = createComprehensiveResultsTable(obj)
-            pairs = obj.coherenceResults.pairs;
+        data1 = obj.data{idx1};
+        data2 = obj.data{idx2};
+        fs = obj.fs(1);
+        
+        sanitizedPair = obj.sanitizeFieldName(pairName);
+        
+        % Initialize sleep cycles structure
+        if ~isfield(obj.coherenceResults, 'sleepCycles')
+            obj.coherenceResults.sleepCycles = struct();
+        end
+        obj.coherenceResults.sleepCycles.(sanitizedPair) = struct();
+        
+        fprintf('  Sleep cycle coherence (%d cycles):\n', length(unique_cycles));
+        
+        for cycleIdx = 1:length(unique_cycles)
+            cycle_num = unique_cycles(cycleIdx);
             
-            resultsTable = table();
+            % Find start and end epochs for this cycle
+            cycle_epochs = find(cycles_vector == cycle_num);
+            if isempty(cycle_epochs)
+                continue;
+            end
             
-            for i = 1:length(pairs)
-                pair = pairs{i};
-                sanitizedPair = obj.sanitizeFieldName(pair);
-                
-                if isfield(obj.coherenceResults.coherence, sanitizedPair)
-                    coherenceData = obj.coherenceResults.coherence.(sanitizedPair);
-                    
-                    globalRow = table();
-                    globalRow.Pair = {pair};
-                    globalRow.SleepStage = {'Global'};
-                    globalRow.MeanCoherence = coherenceData.meanCoherence;
-                    globalRow.MedianCoherence = coherenceData.medianCoherence;
-                    globalRow.PeakCoherence = coherenceData.peakCoherence;
-                    globalRow.PeakFrequency_Hz = coherenceData.peakFrequency;
-                    globalRow.CoherenceBandwidth_Hz = coherenceData.coherenceBandwidth;
-                    globalRow.CoherenceArea = coherenceData.coherenceArea;
-                    globalRow.CoherenceVariance = coherenceData.coherenceVariance;
-                    globalRow.DominantFrequency_Hz = coherenceData.dominantFrequency;
-                    globalRow.SpectralEntropy = coherenceData.spectralEntropy;
-                    
-                    bands = fieldnames(coherenceData.bandCoherence);
-                    for b = 1:length(bands)
-                        bandName = bands{b};
-                        globalRow.(['Coherence_' bandName]) = coherenceData.bandCoherence.(bandName);
-                    end
-                    
-                    if isfield(coherenceData, 'coherenceRatios')
-                        ratios = fieldnames(coherenceData.coherenceRatios);
-                        for r = 1:length(ratios)
-                            ratioName = ratios{r};
-                            globalRow.(['Ratio_' ratioName]) = coherenceData.coherenceRatios.(ratioName);
-                        end
-                    end
-                    
-                    globalRow.DataLength_sec = coherenceData.dataLength;
-                    globalRow.ValidWindows = coherenceData.validWindows;
-                    
-                    resultsTable = [resultsTable; globalRow];
-                end
-                
-                if isfield(obj.coherenceResults.sleepPeriods, sanitizedPair)
-                    periodResults = obj.coherenceResults.sleepPeriods.(sanitizedPair);
-                    periods = fieldnames(periodResults);
-                    
-                    for p = 1:length(periods)
-                        period = periods{p};
-                        periodCoherence = periodResults.(period);
-                        
-                        periodRow = table();
-                        periodRow.Pair = {pair};
-                        periodRow.SleepStage = {period};
-                        periodRow.MeanCoherence = periodCoherence.meanCoherence;
-                        periodRow.MedianCoherence = periodCoherence.medianCoherence;
-                        periodRow.PeakCoherence = periodCoherence.peakCoherence;
-                        periodRow.PeakFrequency_Hz = periodCoherence.peakFrequency;
-                        periodRow.CoherenceBandwidth_Hz = periodCoherence.coherenceBandwidth;
-                        periodRow.CoherenceArea = periodCoherence.coherenceArea;
-                        periodRow.CoherenceVariance = periodCoherence.coherenceVariance;
-                        periodRow.DominantFrequency_Hz = periodCoherence.dominantFrequency;
-                        periodRow.SpectralEntropy = periodCoherence.spectralEntropy;
-                        
-                        bands = fieldnames(periodCoherence.bandCoherence);
-                        for b = 1:length(bands)
-                            bandName = bands{b};
-                            periodRow.(['Coherence_' bandName]) = periodCoherence.bandCoherence.(bandName);
-                        end
-                        
-                        periodRow.DataLength_sec = periodCoherence.dataLength;
-                        periodRow.ValidWindows = periodCoherence.validWindows;
-                        
-                        resultsTable = [resultsTable; periodRow];
-                    end
-                end
-                
-                if isfield(obj.coherenceResults.sleepStages, sanitizedPair)
-                    stageResults = obj.coherenceResults.sleepStages.(sanitizedPair);
-                    stages = fieldnames(stageResults);
-                    
-                    for s = 1:length(stages)
-                        stage = stages{s};
-                        stageCoherence = stageResults.(stage);
-                        
-                        stageRow = table();
-                        stageRow.Pair = {pair};
-                        stageRow.SleepStage = {stage};
-                        stageRow.MeanCoherence = stageCoherence.meanCoherence;
-                        stageRow.MedianCoherence = stageCoherence.medianCoherence;
-                        stageRow.PeakCoherence = stageCoherence.peakCoherence;
-                        stageRow.PeakFrequency_Hz = stageCoherence.peakFrequency;
-                        stageRow.CoherenceBandwidth_Hz = stageCoherence.coherenceBandwidth;
-                        stageRow.CoherenceArea = stageCoherence.coherenceArea;
-                        stageRow.CoherenceVariance = stageCoherence.coherenceVariance;
-                        stageRow.DominantFrequency_Hz = stageCoherence.dominantFrequency;
-                        stageRow.SpectralEntropy = stageCoherence.spectralEntropy;
-                        
-                        bands = fieldnames(stageCoherence.bandCoherence);
-                        for b = 1:length(bands)
-                            bandName = bands{b};
-                            stageRow.(['Coherence_' bandName]) = stageCoherence.bandCoherence.(bandName);
-                        end
-                        
-                        stageRow.DataLength_sec = stageCoherence.dataLength;
-                        stageRow.ValidWindows = stageCoherence.validWindows;
-                        stageRow.StageEpochs = stageCoherence.stageEpochs;
-                        
-                        resultsTable = [resultsTable; stageRow];
-                    end
+            startEpoch = min(cycle_epochs);
+            endEpoch = max(cycle_epochs);
+            
+            cycleMask = false(1, length(data1));
+            
+            % Create mask for this cycle using start/end epochs
+            samplesPerEpoch = 30 * fs;
+            for epoch = startEpoch:endEpoch
+                if epoch <= length(obj.numericHypnogram)
+                    startSample = (epoch-1) * samplesPerEpoch + 1;
+                    endSample = min(epoch * samplesPerEpoch, length(data1));
+                    cycleMask(startSample:endSample) = true;
                 end
             end
+            
+            if sum(cycleMask) > 30 * fs  % At least 30 seconds of data
+                cycleData1 = data1(cycleMask);
+                cycleData2 = data2(cycleMask);
+                
+                cycleCoherence = obj.calculateCoherenceForData(cycleData1, cycleData2, fs);
+                cycleCoherence.cycleNumber = cycle_num;
+                cycleCoherence.startEpoch = startEpoch;
+                cycleCoherence.endEpoch = endEpoch;
+                cycleCoherence.durationMinutes = length(cycleData1) / fs / 60;
+                
+                cycleField = sprintf('Cycle%d', cycle_num);
+                obj.coherenceResults.sleepCycles.(sanitizedPair).(cycleField) = cycleCoherence;
+                
+                fprintf('    Cycle %d: %.3f coherence, %.1f min, epochs %d-%d\n', ...
+                    cycle_num, cycleCoherence.meanCoherence, ...
+                    cycleCoherence.durationMinutes, startEpoch, endEpoch);
+            end
         end
+    catch ME
+        fprintf('  Error in sleep cycle coherence: %s\n', ME.message);
+    end
+end
+
+        function result = calculateCoherenceForData(obj, data1, data2, fs)
+    minLength = min(length(data1), length(data2));
+    data1 = data1(1:minLength)';
+    data2 = data2(1:minLength)';
+    
+    validMask = ~isnan(data1) & ~isnan(data2);
+    data1 = data1(validMask);
+    data2 = data2(validMask);
+    
+    windowLength = obj.coherenceParams.windowLength * fs;
+    overlap = obj.coherenceParams.overlap;
+    nfft = obj.coherenceParams.nfft;
+    
+    [cxy, f] = mscohere(data1, data2, hamming(windowLength), ...
+        round(overlap * windowLength), nfft, fs);
+    
+    freqMask = f >= obj.coherenceParams.freqRange(1) & f <= obj.coherenceParams.freqRange(2);
+    f = f(freqMask);
+    cxy = cxy(freqMask);
+    
+    result = struct();
+    result.frequencies = f;
+    result.coherence = cxy;
+    result.meanCoherence = mean(cxy);
+    result.medianCoherence = median(cxy);
+    result.stdCoherence = std(cxy);
+    result.coherenceVariance = var(cxy);
+    [result.peakCoherence, peakIdx] = max(cxy);
+    result.peakFrequency = f(peakIdx);
+    result.coherenceBandwidth = obj.calculateBandwidth(cxy, f);
+    result.coherenceArea = trapz(f, cxy);
+    result.dominantFrequency = sum(f .* cxy) / sum(cxy);
+    result.spectralEntropy = obj.calculateSpectralEntropy(cxy);
+    
+    % FIX: Ensure band coherence is always calculated
+    result.bandCoherence = obj.calculateBandCoherence(cxy, f);
+    result.coherenceRatios = obj.calculateCoherenceRatios(result.bandCoherence);
+    
+    result.dataLength = length(data1) / fs;
+    result.validWindows = length(cxy);
+end
+        
+function resultsTable = createComprehensiveResultsTable(obj)
+    pairs = obj.coherenceResults.pairs;
+    
+    % Initialize table structure
+    columnNames = {
+        'Pair', 'AnalysisType', 'SleepStage', 'MeanCoherence', ...
+        'MedianCoherence', 'PeakCoherence', 'PeakFrequency_Hz', ...
+        'CoherenceBandwidth_Hz', 'CoherenceArea', 'CoherenceVariance', ...
+        'DominantFrequency_Hz', 'SpectralEntropy', ...
+        'Coherence_Delta', 'Coherence_Theta', 'Coherence_Alpha', ...
+        'Coherence_Sigma', 'Coherence_Beta', 'Coherence_Gamma', ...
+        'Ratio_DeltaTheta', 'Ratio_AlphaBeta', 'Ratio_SigmaDelta', 'Ratio_GammaBeta', ...
+        'DataLength_sec', 'ValidWindows', 'StageEpochs'
+        };
+    
+    % Initialize empty table
+    resultsTable = cell2table(cell(0, length(columnNames)), 'VariableNames', columnNames);
+    
+    for i = 1:length(pairs)
+        pair = pairs{i};
+        sanitizedPair = obj.sanitizeFieldName(pair);
+        
+
+        
+        % SLEEP PERIOD RESULTS
+        if isfield(obj.coherenceResults.sleepPeriods, sanitizedPair)
+            periodResults = obj.coherenceResults.sleepPeriods.(sanitizedPair);
+            periods = fieldnames(periodResults);
+            
+            for p = 1:length(periods)
+                period = periods{p};
+                periodCoherence = periodResults.(period);
+                periodRow = obj.createTableRow(pair, 'SleepPeriod', period, periodCoherence);
+                resultsTable = [resultsTable; periodRow];
+            end
+        end
+        
+        % STAGE-SPECIFIC RESULTS
+        if isfield(obj.coherenceResults.sleepStages, sanitizedPair)
+            stageResults = obj.coherenceResults.sleepStages.(sanitizedPair);
+            stages = fieldnames(stageResults);
+            
+            for s = 1:length(stages)
+                stage = stages{s};
+                stageCoherence = stageResults.(stage);
+                stageRow = obj.createTableRow(pair, 'SleepStage', stage, stageCoherence);
+                resultsTable = [resultsTable; stageRow];
+            end
+        end
+
+        % SLEEP CYCLE RESULTS
+if isfield(obj.coherenceResults, 'sleepCycles') && ...
+   isfield(obj.coherenceResults.sleepCycles, sanitizedPair)
+    cycleResults = obj.coherenceResults.sleepCycles.(sanitizedPair);
+    cycles = fieldnames(cycleResults);
+    
+    for c = 1:length(cycles)
+        cycle = cycles{c};
+        cycleCoherence = cycleResults.(cycle);
+        cycleRow = obj.createTableRow(pair, 'SleepCycle', cycle, cycleCoherence);
+        resultsTable = [resultsTable; cycleRow];
+    end
+end
+
+    end
+end
+
+function row = createTableRow(obj, pair, analysisType, stage, coherenceData)
+    % Create a single table row from coherence data
+    row = table();
+    row.Pair = {pair};
+    row.AnalysisType = {analysisType};
+    row.SleepStage = {stage};
+    row.MeanCoherence = coherenceData.meanCoherence;
+    row.MedianCoherence = coherenceData.medianCoherence;
+    row.PeakCoherence = coherenceData.peakCoherence;
+    row.PeakFrequency_Hz = coherenceData.peakFrequency;
+    row.CoherenceBandwidth_Hz = coherenceData.coherenceBandwidth;
+    row.CoherenceArea = coherenceData.coherenceArea;
+    row.CoherenceVariance = coherenceData.coherenceVariance;
+    row.DominantFrequency_Hz = coherenceData.dominantFrequency;
+    row.SpectralEntropy = coherenceData.spectralEntropy;
+    
+    % Band coherence (with NaN protection)
+    bands = {'Delta', 'Theta', 'Alpha', 'Sigma', 'Beta', 'Gamma'};
+    for b = 1:length(bands)
+        bandName = bands{b};
+        if isfield(coherenceData, 'bandCoherence') && isfield(coherenceData.bandCoherence, bandName)
+            row.(['Coherence_' bandName]) = coherenceData.bandCoherence.(bandName);
+        else
+            row.(['Coherence_' bandName]) = NaN;
+        end
+    end
+    
+    % Coherence ratios (with NaN protection)
+    ratios = {'DeltaTheta', 'AlphaBeta', 'SigmaDelta', 'GammaBeta'};
+    for r = 1:length(ratios)
+        ratioName = ratios{r};
+        if isfield(coherenceData, 'coherenceRatios') && isfield(coherenceData.coherenceRatios, ratioName)
+            row.(['Ratio_' ratioName]) = coherenceData.coherenceRatios.(ratioName);
+        else
+            row.(['Ratio_' ratioName]) = NaN;
+        end
+    end
+    
+    % Data quality metrics
+    row.DataLength_sec = coherenceData.dataLength;
+    row.ValidWindows = coherenceData.validWindows;
+    
+    if isfield(coherenceData, 'stageEpochs')
+        row.StageEpochs = coherenceData.stageEpochs;
+    else
+        row.StageEpochs = NaN;
+    end
+end
         
         function safeName = sanitizeFieldName(~, originalName)
             safeName = regexprep(originalName, '[^a-zA-Z0-9_]', '_');
