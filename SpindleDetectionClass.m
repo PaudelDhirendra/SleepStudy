@@ -1,7 +1,8 @@
 classdef SpindleDetectionClass < handle
     % SpindleDetectionClass: Enhanced sleep spindle detection using hierarchical fusion
-    % OPTIMIZED: Single consensus method with improved k-means clustering
-    % ENHANCED: Based on Chen et al. 2023 hierarchical fusion algorithm
+    % OPTIMIZED: Consolidated channel statistics and topography analysis
+    % ENHANCED: Integrated fast/slow spindle analysis into all metrics
+    % ADDED: Comprehensive SO-spindle timing relationships in Excel output
 
     properties
         edfLoader
@@ -43,8 +44,16 @@ classdef SpindleDetectionClass < handle
 
         % Analysis results
         methodComparison
-        topographyAnalysis
         fusionMetrics
+        
+        % Fast/Slow spindle properties
+        fastSpindleEvents    % Fast spindles (13-16 Hz) [start_s, end_s, peak_s, amplitude, duration_s, frequency_Hz, channel_idx]
+        slowSpindleEvents    % Slow spindles (11-13 Hz) [start_s, end_s, peak_s, amplitude, duration_s, frequency_Hz, channel_idx]
+        
+        % Stage statistics with channel and spindle type information
+        stageStats
+            stageStatsTable      
+    cycleStatsTable      
     end
 
     methods
@@ -90,7 +99,6 @@ classdef SpindleDetectionClass < handle
 
             % Initialize analysis results
             obj.methodComparison = struct();
-            obj.topographyAnalysis = struct();
             obj.fusionMetrics = struct();
             
             % Initialize SPT properties
@@ -100,6 +108,13 @@ classdef SpindleDetectionClass < handle
             obj.sptStartSample = 1;
             obj.sptEndSample = 1;
             obj.sptDuration = 0;
+            
+            % Initialize fast/slow spindle properties
+            obj.fastSpindleEvents = [];
+            obj.slowSpindleEvents = [];
+            
+            % Initialize stage statistics
+            obj.stageStats = struct();
         end
 
         function runDetection(obj, channels, references, just2)
@@ -127,10 +142,14 @@ classdef SpindleDetectionClass < handle
             % Perform comprehensive analysis
             obj.performEnhancedAnalysis();
             obj.performMethodComparison();
-            obj.performTopographyAnalysis();
+            obj.performConsolidatedChannelAnalysis();
+               obj.performStageStatistics();      % NOW: Channel-stage breakdown
+    obj.performCycleStatistics();      % NOW: Channel-cycle-stage breakdown
             
             fprintf('HIERARCHICAL FUSION DETECTION COMPLETED:\n');
             fprintf('  Consensus Spindles: %d\n', size(obj.spindleEvents, 1));
+            fprintf('  Fast Spindles: %d\n', size(obj.fastSpindleEvents, 1));
+            fprintf('  Slow Spindles: %d\n', size(obj.slowSpindleEvents, 1));
             fprintf('  Slow Oscillations: %d\n', size(obj.SO_events, 1));
         end
 
@@ -154,7 +173,8 @@ classdef SpindleDetectionClass < handle
                 fprintf('Performing hierarchical fusion...\n');
                 obj.spindleEvents = obj.performFusionDetection(waveletSpindles, rmsSpindles);
 
-
+                % Classify spindle types
+                obj.classifySpindleTypes();
 
                 % Convert SPT-relative times to absolute times
                 if ~isempty(obj.spindleEvents)
@@ -172,22 +192,909 @@ classdef SpindleDetectionClass < handle
                     obj.analyzeTemporalRelationships();
                 end
 
-                % Step 4: Calculate method comparison statistics
+                % Step 5: Calculate method comparison statistics
                 obj.calculateMethodComparison(waveletSpindles, rmsSpindles);
-
 
                 fprintf('Hierarchical fusion detection completed (SPT only):\n');
                 fprintf('  Slow oscillations: %d\n', size(obj.SO_events, 1));
                 fprintf('  Consensus spindles: %d\n', size(obj.spindleEvents, 1));
+                fprintf('  Fast spindles: %d\n', size(obj.fastSpindleEvents, 1));
+                fprintf('  Slow spindles: %d\n', size(obj.slowSpindleEvents, 1));
 
             catch ME
                 fprintf('Error in hierarchical fusion detection: %s\n', ME.message);
                 obj.SO_events = [];
                 obj.spindleEvents = [];
+                obj.fastSpindleEvents = [];
+                obj.slowSpindleEvents = [];
                 rethrow(ME);
             end
         end
 
+        function classifySpindleTypes(obj)
+            % Classify spindles into fast (13-16 Hz) and slow (11-13 Hz) types
+            fprintf('Classifying spindles into fast and slow types...\n');
+            
+            if isempty(obj.spindleEvents)
+                obj.fastSpindleEvents = [];
+                obj.slowSpindleEvents = [];
+                return;
+            end
+            
+            % Extract frequencies from spindle events (column 6 contains frequency)
+            frequencies = obj.spindleEvents(:,6);
+            
+            % Classify spindles
+            fastMask = frequencies >= 13 & frequencies <= 16;
+            slowMask = frequencies >= 11 & frequencies < 13;
+            
+            obj.fastSpindleEvents = obj.spindleEvents(fastMask, :);
+            obj.slowSpindleEvents = obj.spindleEvents(slowMask, :);
+            
+            fprintf('Spindle type classification:\n');
+            fprintf('  Fast spindles (13-16 Hz): %d\n', size(obj.fastSpindleEvents, 1));
+            fprintf('  Slow spindles (11-13 Hz): %d\n', size(obj.slowSpindleEvents, 1));
+            fprintf('  Unclassified: %d\n', size(obj.spindleEvents, 1) - sum(fastMask) - sum(slowMask));
+        end
+
+        function performConsolidatedChannelAnalysis(obj)
+    % Consolidated analysis with regional grouping (Frontal, Central only)
+    fprintf('Performing consolidated channel analysis with regional grouping...\n');
+    
+    if isempty(obj.spindleEvents) && isempty(obj.SO_events)
+        obj.channelStats = struct();
+        return;
+    end
+
+    % Define channel groups by region (only Frontal and Central)
+    frontal_channels = {'F3-M2', 'F4-M1', 'Fz'};
+    central_channels = {'C3-M2', 'C4-M1', 'Cz'};
+    
+    stages = {'N1', 'N2', 'N3', 'REM'};
+    
+    % Initialize regional statistics
+    stats = struct();
+    
+    % Process each region (only Frontal and Central)
+    regions = {'Frontal', 'Central'};
+    region_channels = {frontal_channels, central_channels};
+    
+    for region_idx = 1:length(regions)
+        region_name = regions{region_idx};
+        region_ch_list = region_channels{region_idx};
+        
+        % Find actual channels from available labels
+        region_ch_indices = [];
+        region_ch_names = {};
+        
+        for ch = 1:length(region_ch_list)
+            ch_idx = find(strcmp(obj.channelLabels, region_ch_list{ch}));
+            if ~isempty(ch_idx)
+                region_ch_indices(end+1) = ch_idx;
+                region_ch_names{end+1} = region_ch_list{ch};
+            end
+        end
+        
+        if isempty(region_ch_indices)
+            continue;
+        end
+        
+        % Initialize region statistics
+        fieldName = ['region_' lower(region_name)];
+        stats.(fieldName) = struct();
+        stats.(fieldName).region_name = region_name;
+        stats.(fieldName).channels = region_ch_names;
+        stats.(fieldName).channel_indices = region_ch_indices;
+        
+        % Initialize totals
+        stats.(fieldName).total_spindles = 0;
+        stats.(fieldName).fast_spindles = 0;
+        stats.(fieldName).slow_spindles = 0;
+        stats.(fieldName).SO_count = 0;
+        
+        % Initialize stage-specific totals
+        for stage_idx = 1:length(stages)
+            stage = stages{stage_idx};
+            stats.(fieldName).(['total_' stage]) = 0;
+            stats.(fieldName).(['fast_' stage]) = 0;
+            stats.(fieldName).(['slow_' stage]) = 0;
+            stats.(fieldName).(['SO_' stage]) = 0;
+        end
+        
+        % Initialize accumulators for means
+        freq_accum = 0;
+        dur_accum = 0;
+        amp_accum = 0;
+        fast_freq_accum = 0;
+        slow_freq_accum = 0;
+        
+        % Count events for each channel in this region
+        for ch_idx_idx = 1:length(region_ch_indices)
+            channel_idx = region_ch_indices(ch_idx_idx);
+            
+            % Count total spindles and SOs for this channel
+            if ~isempty(obj.spindleEvents)
+                channel_spindles = obj.spindleEvents(obj.spindleEvents(:,7) == channel_idx, :);
+                if ~isempty(channel_spindles)
+                    stats.(fieldName).total_spindles = stats.(fieldName).total_spindles + size(channel_spindles, 1);
+                    
+                    % Count by type
+                    fast_mask = channel_spindles(:,6) >= 13 & channel_spindles(:,6) <= 16;
+                    slow_mask = channel_spindles(:,6) >= 11 & channel_spindles(:,6) < 13;
+                    
+                    stats.(fieldName).fast_spindles = stats.(fieldName).fast_spindles + sum(fast_mask);
+                    stats.(fieldName).slow_spindles = stats.(fieldName).slow_spindles + sum(slow_mask);
+                    
+                    % Accumulate for means
+                    freq_accum = freq_accum + sum(channel_spindles(:,6));
+                    dur_accum = dur_accum + sum(channel_spindles(:,5));
+                    amp_accum = amp_accum + sum(channel_spindles(:,4));
+                    
+                    if sum(fast_mask) > 0
+                        fast_freq_accum = fast_freq_accum + sum(channel_spindles(fast_mask,6));
+                    end
+                    if sum(slow_mask) > 0
+                        slow_freq_accum = slow_freq_accum + sum(channel_spindles(slow_mask,6));
+                    end
+                    
+                    % Count by stage for this channel
+                    for stage_idx = 1:length(stages)
+                        stage = stages{stage_idx};
+                        stageNum = obj.getStageNumber(stage);
+                        
+                        stage_spindles = 0;
+                        stage_fast = 0;
+                        stage_slow = 0;
+                        
+                        for i = 1:size(channel_spindles, 1)
+                            epochNumber = ceil(channel_spindles(i,3) / 30);
+                            if epochNumber <= length(obj.numericHypnogram) && ...
+                               obj.numericHypnogram(epochNumber) == stageNum
+                               
+                                stage_spindles = stage_spindles + 1;
+                                freq = channel_spindles(i,6);
+                                if freq >= 13 && freq <= 16
+                                    stage_fast = stage_fast + 1;
+                                elseif freq >= 11 && freq < 13
+                                    stage_slow = stage_slow + 1;
+                                end
+                            end
+                        end
+                        
+                        stats.(fieldName).(['total_' stage]) = stats.(fieldName).(['total_' stage]) + stage_spindles;
+                        stats.(fieldName).(['fast_' stage]) = stats.(fieldName).(['fast_' stage]) + stage_fast;
+                        stats.(fieldName).(['slow_' stage]) = stats.(fieldName).(['slow_' stage]) + stage_slow;
+                    end
+                end
+            end
+            
+            % Count SOs for this channel (mainly for Frontal region)
+            if ~isempty(obj.SO_events)
+                channel_SOs = obj.SO_events(obj.SO_events(:,4) == channel_idx, :);
+                if ~isempty(channel_SOs)
+                    stats.(fieldName).SO_count = stats.(fieldName).SO_count + size(channel_SOs, 1);
+                    
+                    % Count SOs by stage
+                    for stage_idx = 1:length(stages)
+                        stage = stages{stage_idx};
+                        stageNum = obj.getStageNumber(stage);
+                        
+                        stage_SOs = 0;
+                        for i = 1:size(channel_SOs, 1)
+                            epochNumber = ceil(channel_SOs(i,1) / 30);
+                            if epochNumber <= length(obj.numericHypnogram) && ...
+                               obj.numericHypnogram(epochNumber) == stageNum
+                                stage_SOs = stage_SOs + 1;
+                            end
+                        end
+                        stats.(fieldName).(['SO_' stage]) = stats.(fieldName).(['SO_' stage]) + stage_SOs;
+                    end
+                end
+            end
+        end
+        
+        % Calculate means for the region
+        if stats.(fieldName).total_spindles > 0
+            stats.(fieldName).mean_frequency = freq_accum / stats.(fieldName).total_spindles;
+            stats.(fieldName).mean_duration = dur_accum / stats.(fieldName).total_spindles;
+            stats.(fieldName).mean_amplitude = amp_accum / stats.(fieldName).total_spindles;
+        else
+            stats.(fieldName).mean_frequency = 0;
+            stats.(fieldName).mean_duration = 0;
+            stats.(fieldName).mean_amplitude = 0;
+        end
+        
+        if stats.(fieldName).fast_spindles > 0
+            stats.(fieldName).fast_mean_freq = fast_freq_accum / stats.(fieldName).fast_spindles;
+        else
+            stats.(fieldName).fast_mean_freq = 0;
+        end
+        
+        if stats.(fieldName).slow_spindles > 0
+            stats.(fieldName).slow_mean_freq = slow_freq_accum / stats.(fieldName).slow_spindles;
+        else
+            stats.(fieldName).slow_mean_freq = 0;
+        end
+        
+        % Calculate densities
+        totalNREMTime = obj.calculateNREMTime();
+        if totalNREMTime > 0
+            stats.(fieldName).spindle_density = stats.(fieldName).total_spindles / totalNREMTime;
+            stats.(fieldName).fast_density = stats.(fieldName).fast_spindles / totalNREMTime;
+            stats.(fieldName).slow_density = stats.(fieldName).slow_spindles / totalNREMTime;
+            stats.(fieldName).SO_density = stats.(fieldName).SO_count / totalNREMTime;
+            
+            % Calculate stage-specific densities
+            stageDurations = obj.calculateStageDurations();
+            for stage_idx = 1:length(stages)
+                stage = stages{stage_idx};
+                stage_duration = stageDurations.(stage);
+                if stage_duration > 0
+                    stats.(fieldName).([stage '_spindle_density']) = ...
+                        stats.(fieldName).(['total_' stage]) / stage_duration;
+                    stats.(fieldName).([stage '_fast_density']) = ...
+                        stats.(fieldName).(['fast_' stage]) / stage_duration;
+                    stats.(fieldName).([stage '_slow_density']) = ...
+                        stats.(fieldName).(['slow_' stage]) / stage_duration;
+                    stats.(fieldName).([stage '_SO_density']) = ...
+                        stats.(fieldName).(['SO_' stage]) / stage_duration;
+                else
+                    stats.(fieldName).([stage '_spindle_density']) = 0;
+                    stats.(fieldName).([stage '_fast_density']) = 0;
+                    stats.(fieldName).([stage '_slow_density']) = 0;
+                    stats.(fieldName).([stage '_SO_density']) = 0;
+                end
+            end
+        else
+            stats.(fieldName).spindle_density = 0;
+            stats.(fieldName).fast_density = 0;
+            stats.(fieldName).slow_density = 0;
+            stats.(fieldName).SO_density = 0;
+            for stage_idx = 1:length(stages)
+                stage = stages{stage_idx};
+                stats.(fieldName).([stage '_spindle_density']) = 0;
+                stats.(fieldName).([stage '_fast_density']) = 0;
+                stats.(fieldName).([stage '_slow_density']) = 0;
+                stats.(fieldName).([stage '_SO_density']) = 0;
+            end
+        end
+    end
+    
+    obj.channelStats = stats;
+    
+    % Print summary
+    fprintf('Regional Channel Analysis (Frontal & Central only):\n');
+    fieldNames = fieldnames(stats);
+    for i = 1:length(fieldNames)
+        fieldName = fieldNames{i};
+        regionData = stats.(fieldName);
+        fprintf('  %s: Total:%d (Fast:%d, Slow:%d) SO:%d\n', ...
+            regionData.region_name, regionData.total_spindles, regionData.fast_spindles, ...
+            regionData.slow_spindles, regionData.SO_count);
+        fprintf('    Channels: %s\n', strjoin(regionData.channels, ', '));
+        for stage_idx = 1:length(stages)
+            stage = stages{stage_idx};
+            fprintf('    %s: %d spindles\n', stage, regionData.(['total_' stage]));
+        end
+    end
+end
+
+        function performStageStatistics(obj)
+    % Stage statistics with channel breakdown AND totals
+    fprintf('Performing stage statistics by channel with totals...\n');
+    
+    obj.stageStats = struct();
+    
+    if isempty(obj.spindleEvents)
+        fprintf('No spindle events found for stage statistics\n');
+        return;
+    end
+    
+    % Get all channels that have spindles
+    spindle_channels = unique(obj.spindleEvents(:,7));
+    stages = {'N1', 'N2', 'N3', 'REM'};
+    
+    % Calculate stage durations (same for all channels)
+    stageDurations = obj.calculateStageDurations();
+    
+    % Initialize data structure
+    data = {};
+    
+    % FIRST: Add channel-specific stage statistics
+    for chIdx = 1:length(spindle_channels)
+        channelIdx = spindle_channels(chIdx);
+        if channelIdx <= length(obj.channelLabels)
+            chName = obj.channelLabels{channelIdx};
+            
+            for stageIdx = 1:length(stages)
+                stage = stages{stageIdx};
+                stageNum = obj.getStageNumber(stage);
+                
+                % Count spindles for this channel-stage combination
+                [spindle_count, fast_count, slow_count, mean_freq, mean_dur, mean_amp] = ...
+                    obj.countSpindlesInChannelStage(channelIdx, stageNum);
+                
+                % Calculate statistics
+                stage_duration = stageDurations.(stage);
+                spindle_density = 0;
+                fast_density = 0;
+                slow_density = 0;
+                
+                if stage_duration > 0
+                    spindle_density = spindle_count / stage_duration;
+                    fast_density = fast_count / stage_duration;
+                    slow_density = slow_count / stage_duration;
+                end
+                
+                % Add to data table (only if there are spindles)
+                if spindle_count > 0
+                    data{end+1, 1} = chName;
+                    data{end, 2} = stage;
+                    data{end, 3} = spindle_count;
+                    data{end, 4} = fast_count;
+                    data{end, 5} = slow_count;
+                    data{end, 6} = stage_duration;
+                    data{end, 7} = spindle_density;
+                    data{end, 8} = fast_density;
+                    data{end, 9} = slow_density;
+                    data{end, 10} = mean_freq;
+                    data{end, 11} = mean_dur;
+                    data{end, 12} = mean_amp;
+                end
+            end
+        end
+    end
+    
+    % SECOND: Add TOTALS for each stage (across all channels)
+    for stageIdx = 1:length(stages)
+        stage = stages{stageIdx};
+        stageNum = obj.getStageNumber(stage);
+        
+        total_spindles = 0;
+        total_fast = 0;
+        total_slow = 0;
+        total_freq_accum = 0;
+        total_dur_accum = 0;
+        total_amp_accum = 0;
+        
+        % Sum across all channels for this stage
+        for chIdx = 1:length(spindle_channels)
+            channelIdx = spindle_channels(chIdx);
+            [spindle_count, fast_count, slow_count, mean_freq, mean_dur, mean_amp] = ...
+                obj.countSpindlesInChannelStage(channelIdx, stageNum);
+            
+            total_spindles = total_spindles + spindle_count;
+            total_fast = total_fast + fast_count;
+            total_slow = total_slow + slow_count;
+            total_freq_accum = total_freq_accum + (mean_freq * spindle_count);
+            total_dur_accum = total_dur_accum + (mean_dur * spindle_count);
+            total_amp_accum = total_amp_accum + (mean_amp * spindle_count);
+        end
+        
+        % Calculate averages for totals
+        mean_freq_total = 0;
+        mean_dur_total = 0;
+        mean_amp_total = 0;
+        
+        if total_spindles > 0
+            mean_freq_total = total_freq_accum / total_spindles;
+            mean_dur_total = total_dur_accum / total_spindles;
+            mean_amp_total = total_amp_accum / total_spindles;
+        end
+        
+        stage_duration = stageDurations.(stage);
+        spindle_density_total = 0;
+        fast_density_total = 0;
+        slow_density_total = 0;
+        
+        if stage_duration > 0
+            spindle_density_total = total_spindles / stage_duration;
+            fast_density_total = total_fast / stage_duration;
+            slow_density_total = total_slow / stage_duration;
+        end
+        
+        % Add TOTAL row for this stage
+        if total_spindles > 0
+            data{end+1, 1} = 'TOTAL';
+            data{end, 2} = stage;
+            data{end, 3} = total_spindles;
+            data{end, 4} = total_fast;
+            data{end, 5} = total_slow;
+            data{end, 6} = stage_duration;
+            data{end, 7} = spindle_density_total;
+            data{end, 8} = fast_density_total;
+            data{end, 9} = slow_density_total;
+            data{end, 10} = mean_freq_total;
+            data{end, 11} = mean_dur_total;
+            data{end, 12} = mean_amp_total;
+        end
+    end
+    
+    % Store as table directly
+    if isempty(data)
+        obj.stageStatsTable = table();
+    else
+        obj.stageStatsTable = cell2table(data, 'VariableNames', {
+            'Channel', 'Stage', 'Total_Spindles', 'Fast_Spindles', 'Slow_Spindles', ...
+            'Stage_Duration_min', 'Spindle_Density_perMin', 'Fast_Density_perMin', ...
+            'Slow_Density_perMin', 'Mean_Frequency_Hz', 'Mean_Duration_s', 'Mean_Amplitude'
+            });
+    end
+    
+    fprintf('Stage statistics completed: %d rows (channel breakdown + totals)\n', size(data, 1));
+end
+
+function performCycleStatistics(obj)
+    % Cycle statistics with channel-stage breakdown AND totals
+    fprintf('Performing cycle statistics by channel and stage with totals...\n');
+    
+    if isempty(obj.spindleEvents) || isempty(obj.sleepCycles) || isempty(obj.numericHypnogram)
+        fprintf('Insufficient data for cycle statistics\n');
+        obj.cycleStatsTable = table();
+        return;
+    end
+    
+    uniqueCycles = unique(obj.sleepCycles(obj.sleepCycles > 0));
+    spindle_channels = unique(obj.spindleEvents(:,7));
+    stages = {'N1', 'N2', 'N3', 'REM'};
+    
+    data = {};
+    
+    for cycleIdx = 1:length(uniqueCycles)
+        cycleNum = uniqueCycles(cycleIdx);
+        cycleEpochs = find(obj.sleepCycles == cycleNum);
+        cycleDuration = length(cycleEpochs) * 0.5; % minutes
+        
+        % Calculate stage durations within this cycle
+        cycleStageDurations = obj.calculateCycleStageDurations(cycleEpochs);
+        
+        % FIRST: Add channel-stage specific statistics for this cycle
+        for chIdx = 1:length(spindle_channels)
+            channelIdx = spindle_channels(chIdx);
+            if channelIdx <= length(obj.channelLabels)
+                chName = obj.channelLabels{channelIdx};
+                
+                for stageIdx = 1:length(stages)
+                    stage = stages{stageIdx};
+                    stageNum = obj.getStageNumber(stage);
+                    
+                    % Count spindles for this channel-cycle-stage combination
+                    [spindle_count, fast_count, slow_count, mean_freq, mean_dur, mean_amp] = ...
+                        obj.countSpindlesInChannelCycleStage(channelIdx, cycleEpochs, stageNum);
+                    
+                    % Calculate statistics
+                    stage_duration = cycleStageDurations.(stage);
+                    spindle_density = 0;
+                    fast_density = 0;
+                    slow_density = 0;
+                    
+                    if stage_duration > 0
+                        spindle_density = spindle_count / stage_duration;
+                        fast_density = fast_count / stage_duration;
+                        slow_density = slow_count / stage_duration;
+                    end
+                    
+                    % Add to data table (only if there are spindles or meaningful duration)
+                    if spindle_count > 0 || stage_duration > 1.0
+                        data{end+1, 1} = cycleNum;
+                        data{end, 2} = chName;
+                        data{end, 3} = stage;
+                        data{end, 4} = spindle_count;
+                        data{end, 5} = fast_count;
+                        data{end, 6} = slow_count;
+                        data{end, 7} = stage_duration;
+                        data{end, 8} = spindle_density;
+                        data{end, 9} = fast_density;
+                        data{end, 10} = slow_density;
+                        data{end, 11} = mean_freq;
+                        data{end, 12} = mean_dur;
+                        data{end, 13} = mean_amp;
+                        data{end, 14} = cycleDuration;
+                    end
+                end
+            end
+        end
+        
+        % SECOND: Add TOTALS for each stage in this cycle (across all channels)
+        for stageIdx = 1:length(stages)
+            stage = stages{stageIdx};
+            stageNum = obj.getStageNumber(stage);
+            
+            total_spindles = 0;
+            total_fast = 0;
+            total_slow = 0;
+            total_freq_accum = 0;
+            total_dur_accum = 0;
+            total_amp_accum = 0;
+            
+            % Sum across all channels for this stage in this cycle
+            for chIdx = 1:length(spindle_channels)
+                channelIdx = spindle_channels(chIdx);
+                [spindle_count, fast_count, slow_count, mean_freq, mean_dur, mean_amp] = ...
+                    obj.countSpindlesInChannelCycleStage(channelIdx, cycleEpochs, stageNum);
+                
+                total_spindles = total_spindles + spindle_count;
+                total_fast = total_fast + fast_count;
+                total_slow = total_slow + slow_count;
+                total_freq_accum = total_freq_accum + (mean_freq * spindle_count);
+                total_dur_accum = total_dur_accum + (mean_dur * spindle_count);
+                total_amp_accum = total_amp_accum + (mean_amp * spindle_count);
+            end
+            
+            % Calculate averages for totals
+            mean_freq_total = 0;
+            mean_dur_total = 0;
+            mean_amp_total = 0;
+            
+            if total_spindles > 0
+                mean_freq_total = total_freq_accum / total_spindles;
+                mean_dur_total = total_dur_accum / total_spindles;
+                mean_amp_total = total_amp_accum / total_spindles;
+            end
+            
+            stage_duration = cycleStageDurations.(stage);
+            spindle_density_total = 0;
+            fast_density_total = 0;
+            slow_density_total = 0;
+            
+            if stage_duration > 0
+                spindle_density_total = total_spindles / stage_duration;
+                fast_density_total = total_fast / stage_duration;
+                slow_density_total = total_slow / stage_duration;
+            end
+            
+            % Add TOTAL row for this stage in this cycle
+            if total_spindles > 0 || stage_duration > 1.0
+                data{end+1, 1} = cycleNum;
+                data{end, 2} = 'TOTAL';
+                data{end, 3} = stage;
+                data{end, 4} = total_spindles;
+                data{end, 5} = total_fast;
+                data{end, 6} = total_slow;
+                data{end, 7} = stage_duration;
+                data{end, 8} = spindle_density_total;
+                data{end, 9} = fast_density_total;
+                data{end, 10} = slow_density_total;
+                data{end, 11} = mean_freq_total;
+                data{end, 12} = mean_dur_total;
+                data{end, 13} = mean_amp_total;
+                data{end, 14} = cycleDuration;
+            end
+        end
+    end
+    
+    % Store as table directly
+    if isempty(data)
+        obj.cycleStatsTable = table();
+    else
+        obj.cycleStatsTable = cell2table(data, 'VariableNames', {
+            'Cycle', 'Channel', 'Stage', 'Total_Spindles', 'Fast_Spindles', 'Slow_Spindles', ...
+            'Stage_Duration_min', 'Spindle_Density_perMin', 'Fast_Density_perMin', ...
+            'Slow_Density_perMin', 'Mean_Frequency_Hz', 'Mean_Duration_s', 'Mean_Amplitude', ...
+            'Cycle_Duration_min'
+            });
+    end
+    
+    fprintf('Cycle statistics completed: %d rows (channel-stage breakdown + totals)\n', size(data, 1));
+end
+function stageDurations = calculateStageDurations(obj)
+    % Calculate stage durations in minutes for all sleep stages
+    stageDurations = struct();
+    
+    if isempty(obj.numericHypnogram)
+        % If no hypnogram, return zeros
+        stages = {'N1', 'N2', 'N3', 'REM'};
+        for i = 1:length(stages)
+            stageDurations.(stages{i}) = 0;
+        end
+        return;
+    end
+    
+    % Get SPT hypnogram
+    sptHypnogram = obj.getSPTHypnogram();
+    
+    % Count epochs for each stage (each epoch is 30 seconds = 0.5 minutes)
+    stageDurations.N1 = sum(sptHypnogram == 1) * 0.5;
+    stageDurations.N2 = sum(sptHypnogram == 2) * 0.5;
+    stageDurations.N3 = sum(sptHypnogram == 3) * 0.5;
+    stageDurations.REM = sum(sptHypnogram == 5) * 0.5;
+end
+
+function cycleStageDurations = calculateCycleStageDurations(obj, cycleEpochs)
+    % Calculate stage durations within a specific cycle
+    cycleStageDurations = struct();
+    
+    if isempty(obj.numericHypnogram) || isempty(cycleEpochs)
+        stages = {'N1', 'N2', 'N3', 'REM'};
+        for i = 1:length(stages)
+            cycleStageDurations.(stages{i}) = 0;
+        end
+        return;
+    end
+    
+    % Get stages for the cycle epochs
+    cycleStages = obj.numericHypnogram(cycleEpochs);
+    
+    % Count epochs for each stage (each epoch is 30 seconds = 0.5 minutes)
+    cycleStageDurations.N1 = sum(cycleStages == 1) * 0.5;
+    cycleStageDurations.N2 = sum(cycleStages == 2) * 0.5;
+    cycleStageDurations.N3 = sum(cycleStages == 3) * 0.5;
+    cycleStageDurations.REM = sum(cycleStages == 5) * 0.5;
+end
+
+% Helper functions for counting spindles
+function [spindle_count, fast_count, slow_count, mean_freq, mean_dur, mean_amp] = countSpindlesInChannelStage(obj, channelIdx, stageNum)
+    % Count spindles for a specific channel and stage
+    spindle_count = 0;
+    fast_count = 0;
+    slow_count = 0;
+    freq_accum = 0;
+    dur_accum = 0;
+    amp_accum = 0;
+    
+    for i = 1:size(obj.spindleEvents, 1)
+        spindle = obj.spindleEvents(i, :);
+        if spindle(7) == channelIdx
+            epochNumber = ceil(spindle(3) / 30);
+            if epochNumber <= length(obj.numericHypnogram) && ...
+               obj.numericHypnogram(epochNumber) == stageNum
+                
+                spindle_count = spindle_count + 1;
+                freq = spindle(6);
+                freq_accum = freq_accum + freq;
+                dur_accum = dur_accum + spindle(5);
+                amp_accum = amp_accum + spindle(4);
+                
+                if freq >= 13 && freq <= 16
+                    fast_count = fast_count + 1;
+                elseif freq >= 11 && freq < 13
+                    slow_count = slow_count + 1;
+                end
+            end
+        end
+    end
+    
+    % Calculate means
+    mean_freq = 0;
+    mean_dur = 0;
+    mean_amp = 0;
+    if spindle_count > 0
+        mean_freq = freq_accum / spindle_count;
+        mean_dur = dur_accum / spindle_count;
+        mean_amp = amp_accum / spindle_count;
+    end
+end
+
+function [spindle_count, fast_count, slow_count, mean_freq, mean_dur, mean_amp] = countSpindlesInChannelCycleStage(obj, channelIdx, cycleEpochs, stageNum)
+    % Count spindles for a specific channel, cycle, and stage
+    spindle_count = 0;
+    fast_count = 0;
+    slow_count = 0;
+    freq_accum = 0;
+    dur_accum = 0;
+    amp_accum = 0;
+    
+    for i = 1:size(obj.spindleEvents, 1)
+        spindle = obj.spindleEvents(i, :);
+        if spindle(7) == channelIdx
+            epochNumber = ceil(spindle(3) / 30);
+            if ismember(epochNumber, cycleEpochs) && ...
+               epochNumber <= length(obj.numericHypnogram) && ...
+               obj.numericHypnogram(epochNumber) == stageNum
+                
+                spindle_count = spindle_count + 1;
+                freq = spindle(6);
+                freq_accum = freq_accum + freq;
+                dur_accum = dur_accum + spindle(5);
+                amp_accum = amp_accum + spindle(4);
+                
+                if freq >= 13 && freq <= 16
+                    fast_count = fast_count + 1;
+                elseif freq >= 11 && freq < 13
+                    slow_count = slow_count + 1;
+                end
+            end
+        end
+    end
+    
+    % Calculate means
+    mean_freq = 0;
+    mean_dur = 0;
+    mean_amp = 0;
+    if spindle_count > 0
+        mean_freq = freq_accum / spindle_count;
+        mean_dur = dur_accum / spindle_count;
+        mean_amp = amp_accum / spindle_count;
+    end
+end
+
+        function channelDist = getChannelDistributionInStage(obj, stageNum)
+            % Get spindle distribution across channels for a specific stage
+            channelDist = struct();
+            
+            if isempty(obj.spindleEvents)
+                return;
+            end
+            
+            % Get all channels that have spindles in this stage
+            channelsInStage = [];
+            for i = 1:size(obj.spindleEvents, 1)
+                epochNumber = ceil(obj.spindleEvents(i,3) / 30);
+                if epochNumber <= length(obj.numericHypnogram) && obj.numericHypnogram(epochNumber) == stageNum
+                    chIdx = obj.spindleEvents(i,7);
+                    if chIdx <= length(obj.channelLabels)
+                        chName = obj.channelLabels{chIdx};
+                        if obj.isEEGChannel(chName)
+                            channelsInStage(end+1) = chIdx;
+                        end
+                    end
+                end
+            end
+            
+            channelsInStage = unique(channelsInStage);
+            
+            for i = 1:length(channelsInStage)
+                chIdx = channelsInStage(i);
+                chName = obj.channelLabels{chIdx};
+                fieldName = ['channel_' num2str(chIdx)];
+                
+                channelDist.(fieldName) = struct();
+                channelDist.(fieldName).name = chName;
+                channelDist.(fieldName).total_spindles = 0;
+                channelDist.(fieldName).fast_spindles = 0;
+                channelDist.(fieldName).slow_spindles = 0;
+                
+                % Count spindles in this stage for this channel
+                for j = 1:size(obj.spindleEvents, 1)
+                    epochNumber = ceil(obj.spindleEvents(j,3) / 30);
+                    if epochNumber <= length(obj.numericHypnogram) && ...
+                       obj.numericHypnogram(epochNumber) == stageNum && ...
+                       obj.spindleEvents(j,7) == chIdx
+                       
+                        channelDist.(fieldName).total_spindles = channelDist.(fieldName).total_spindles + 1;
+                        
+                        freq = obj.spindleEvents(j,6);
+                        if freq >= 13 && freq <= 16
+                            channelDist.(fieldName).fast_spindles = channelDist.(fieldName).fast_spindles + 1;
+                        elseif freq >= 11 && freq < 13
+                            channelDist.(fieldName).slow_spindles = channelDist.(fieldName).slow_spindles + 1;
+                        end
+                    end
+                end
+            end
+        end
+
+        function count = countFastSpindlesInStage(obj, stageNum)
+            % Count fast spindles in specific sleep stage
+            count = 0;
+            
+            if isempty(obj.fastSpindleEvents)
+                return;
+            end
+
+            for i = 1:size(obj.fastSpindleEvents, 1)
+                epochNumber = ceil(obj.fastSpindleEvents(i,3) / 30);
+                if epochNumber <= length(obj.numericHypnogram) && obj.numericHypnogram(epochNumber) == stageNum
+                    count = count + 1;
+                end
+            end
+        end
+
+        function count = countSlowSpindlesInStage(obj, stageNum)
+            % Count slow spindles in specific sleep stage
+            count = 0;
+            
+            if isempty(obj.slowSpindleEvents)
+                return;
+            end
+
+            for i = 1:size(obj.slowSpindleEvents, 1)
+                epochNumber = ceil(obj.slowSpindleEvents(i,3) / 30);
+                if epochNumber <= length(obj.numericHypnogram) && obj.numericHypnogram(epochNumber) == stageNum
+                    count = count + 1;
+                end
+            end
+        end
+
+        function isEEG = isEEGChannel(~, channelName)
+            % Check if channel is an EEG channel
+            eeg_patterns = {'F3', 'F4', 'C3', 'C4', 'O1', 'O2', 'Fz', 'Cz', 'Pz', 'Oz', 'EEG'};
+            isEEG = false;
+            for pattern = eeg_patterns
+                if contains(channelName, pattern{1})
+                    isEEG = true;
+                    break;
+                end
+            end
+        end
+
+        function analyzeTemporalRelationships(obj)
+            % Comprehensive temporal relationship analysis between SOs and spindles
+            fprintf('Analyzing SO-spindle temporal relationships...\n');
+            
+            obj.temporalRelations = struct();
+
+            if isempty(obj.SO_events) || isempty(obj.spindleEvents)
+                fprintf('  Not enough data for temporal analysis\n');
+                return;
+            end
+
+            SO_times = obj.SO_events(:,1);
+            spindle_times = obj.spindleEvents(:,3);
+            spindle_frequencies = obj.spindleEvents(:,6);
+
+            obj.temporalRelations.SO_count = length(SO_times);
+            obj.temporalRelations.spindle_count = length(spindle_times);
+            obj.temporalRelations.fast_spindle_count = sum(spindle_frequencies >= 13 & spindle_frequencies <= 16);
+            obj.temporalRelations.slow_spindle_count = sum(spindle_frequencies >= 11 & spindle_frequencies < 13);
+            
+            % Find nearest SO for each spindle and calculate timing
+            time_differences = zeros(size(spindle_times));
+            nearest_SO_times = zeros(size(spindle_times));
+            coupling_strengths = zeros(size(spindle_times));
+            
+            for i = 1:length(spindle_times)
+                [min_time_diff, idx] = min(abs(SO_times - spindle_times(i)));
+                time_differences(i) = spindle_times(i) - SO_times(idx);
+                nearest_SO_times(i) = SO_times(idx);
+                
+                % Simple coupling strength based on temporal proximity
+                coupling_strengths(i) = exp(-abs(min_time_diff) / 0.5); % 0.5s time constant
+            end
+            
+            obj.temporalRelations.time_differences = time_differences;
+            obj.temporalRelations.nearest_SO_times = nearest_SO_times;
+            obj.temporalRelations.coupling_strengths = coupling_strengths;
+            
+            % Calculate statistics
+            obj.temporalRelations.mean_time_diff = mean(time_differences);
+            obj.temporalRelations.std_time_diff = std(time_differences);
+            obj.temporalRelations.median_time_diff = median(time_differences);
+            obj.temporalRelations.mean_coupling_strength = mean(coupling_strengths);
+            
+            % Categorize coupling
+            early_coupled = sum(time_differences < -1.0); % Spindles >1s before SO peak
+            late_coupled = sum(time_differences > 1.0);   % Spindles >1s after SO peak
+            tightly_coupled = sum(abs(time_differences) <= 1.0); % Spindles within ±1s of SO peak
+            
+            obj.temporalRelations.early_coupled_count = early_coupled;
+            obj.temporalRelations.late_coupled_count = late_coupled;
+            obj.temporalRelations.tightly_coupled_count = tightly_coupled;
+            obj.temporalRelations.early_coupled_percent = (early_coupled / length(time_differences)) * 100;
+            obj.temporalRelations.late_coupled_percent = (late_coupled / length(time_differences)) * 100;
+            obj.temporalRelations.tightly_coupled_percent = (tightly_coupled / length(time_differences)) * 100;
+            
+            % Fast vs slow spindle coupling differences
+            fast_mask = spindle_frequencies >= 13 & spindle_frequencies <= 16;
+            slow_mask = spindle_frequencies >= 11 & spindle_frequencies < 13;
+            
+            if sum(fast_mask) > 0
+                obj.temporalRelations.fast_mean_time_diff = mean(time_differences(fast_mask));
+                obj.temporalRelations.fast_mean_coupling = mean(coupling_strengths(fast_mask));
+            else
+                obj.temporalRelations.fast_mean_time_diff = 0;
+                obj.temporalRelations.fast_mean_coupling = 0;
+            end
+            
+            if sum(slow_mask) > 0
+                obj.temporalRelations.slow_mean_time_diff = mean(time_differences(slow_mask));
+                obj.temporalRelations.slow_mean_coupling = mean(coupling_strengths(slow_mask));
+            else
+                obj.temporalRelations.slow_mean_time_diff = 0;
+                obj.temporalRelations.slow_mean_coupling = 0;
+            end
+            
+            fprintf('Temporal Relationship Analysis:\n');
+            fprintf('  Total SO-spindle pairs: %d\n', length(time_differences));
+            fprintf('  Mean time difference: %.3f ± %.3f s\n', ...
+                obj.temporalRelations.mean_time_diff, obj.temporalRelations.std_time_diff);
+            fprintf('  Tightly coupled (±1s): %d (%.1f%%)\n', ...
+                tightly_coupled, obj.temporalRelations.tightly_coupled_percent);
+            fprintf('  Fast spindle coupling: %.3f s\n', obj.temporalRelations.fast_mean_time_diff);
+            fprintf('  Slow spindle coupling: %.3f s\n', obj.temporalRelations.slow_mean_time_diff);
+        end
+
+        % KEEP ALL ORIGINAL DETECTION METHODS EXACTLY AS THEY WERE
         function consensusSpindles = performFusionDetection(obj, waveletSpindles, rmsSpindles)
             % Perform hierarchical fusion of wavelet and RMS detections
             
@@ -929,50 +1836,27 @@ classdef SpindleDetectionClass < handle
             obj.waveletParams.minQualityScore = 0.3;  % Minimum quality score
         end
 
-        function analyzeTemporalRelationships(obj)
-            % Basic temporal relationship analysis
-            obj.temporalRelations = struct();
-
-            if isempty(obj.SO_events) || isempty(obj.spindleEvents)
-                return;
-            end
-
-            SO_times = obj.SO_events(:,1);
-            spindle_times = obj.spindleEvents(:,3);
-
-            obj.temporalRelations.SO_count = length(SO_times);
-            obj.temporalRelations.spindle_count = length(spindle_times);
-            
-            % Calculate basic temporal statistics
-            if ~isempty(SO_times) && ~isempty(spindle_times)
-                % Find nearest SO for each spindle
-                nearest_SO = zeros(size(spindle_times));
-                for i = 1:length(spindle_times)
-                    [~, idx] = min(abs(SO_times - spindle_times(i)));
-                    nearest_SO(i) = SO_times(idx);
-                end
-                
-                time_differences = spindle_times - nearest_SO;
-                obj.temporalRelations.mean_time_diff = mean(time_differences);
-                obj.temporalRelations.std_time_diff = std(time_differences);
-            end
-        end
-
         function performMethodComparison(obj)
             % Store fusion metrics
             fprintf('Calculating fusion detection metrics...\n');
             
             metrics = struct();
             metrics.total_spindles = size(obj.spindleEvents, 1);
+            metrics.fast_spindles = size(obj.fastSpindleEvents, 1);
+            metrics.slow_spindles = size(obj.slowSpindleEvents, 1);
             metrics.total_SO = size(obj.SO_events, 1);
             
             % Density calculations
             totalNREMTime = obj.calculateNREMTime();
             if totalNREMTime > 0
                 metrics.spindle_density = metrics.total_spindles / totalNREMTime;
+                metrics.fast_density = metrics.fast_spindles / totalNREMTime;
+                metrics.slow_density = metrics.slow_spindles / totalNREMTime;
                 metrics.SO_density = metrics.total_SO / totalNREMTime;
             else
                 metrics.spindle_density = 0;
+                metrics.fast_density = 0;
+                metrics.slow_density = 0;
                 metrics.SO_density = 0;
             end
             
@@ -996,161 +1880,63 @@ classdef SpindleDetectionClass < handle
             obj.fusionMetrics = metrics;
             
             fprintf('Fusion Detection Metrics:\n');
-            fprintf('  Total Spindles: %d\n', metrics.total_spindles);
+            fprintf('  Total Spindles: %d (Fast:%d, Slow:%d)\n', metrics.total_spindles, metrics.fast_spindles, metrics.slow_spindles);
             fprintf('  Total SO: %d\n', metrics.total_SO);
-            fprintf('  Spindle Density: %.2f/min\n', metrics.spindle_density);
+            fprintf('  Spindle Density: %.2f/min (Fast:%.2f, Slow:%.2f)\n', metrics.spindle_density, metrics.fast_density, metrics.slow_density);
             fprintf('  SO Density: %.2f/min\n', metrics.SO_density);
             fprintf('  Mean Frequency: %.2f Hz\n', metrics.mean_frequency);
             fprintf('  Mean Duration: %.2f s\n', metrics.mean_duration);
         end
 
         function calculateMethodComparison(obj, waveletSpindles, rmsSpindles)
-    % Calculate separate statistics for RMS and wavelet methods
-    fprintf('Calculating method comparison statistics...\n');
-    
-    obj.methodComparison = struct();
-    
-    % Wavelet statistics
-    if ~isempty(waveletSpindles)
-        obj.methodComparison.wavelet_total = size(waveletSpindles, 1);
-        obj.methodComparison.wavelet_mean_freq = mean(waveletSpindles(:,6));
-        obj.methodComparison.wavelet_mean_dur = mean(waveletSpindles(:,5));
-        obj.methodComparison.wavelet_mean_amp = mean(waveletSpindles(:,4));
-    else
-        obj.methodComparison.wavelet_total = 0;
-        obj.methodComparison.wavelet_mean_freq = 0;
-        obj.methodComparison.wavelet_mean_dur = 0;
-        obj.methodComparison.wavelet_mean_amp = 0;
-    end
-    
-    % RMS statistics
-    if ~isempty(rmsSpindles)
-        obj.methodComparison.rms_total = size(rmsSpindles, 1);
-        obj.methodComparison.rms_mean_freq = mean(rmsSpindles(:,6));
-        obj.methodComparison.rms_mean_dur = mean(rmsSpindles(:,5));
-        obj.methodComparison.rms_mean_amp = mean(rmsSpindles(:,4));
-    else
-        obj.methodComparison.rms_total = 0;
-        obj.methodComparison.rms_mean_freq = 0;
-        obj.methodComparison.rms_mean_dur = 0;
-        obj.methodComparison.rms_mean_amp = 0;
-    end
-    
-    % Fusion statistics - Calculate directly from spindleEvents
-    if ~isempty(obj.spindleEvents)
-        obj.methodComparison.fusion_total = size(obj.spindleEvents, 1);
-        obj.methodComparison.fusion_mean_freq = mean(obj.spindleEvents(:,6));
-        obj.methodComparison.fusion_mean_dur = mean(obj.spindleEvents(:,5));
-        obj.methodComparison.fusion_mean_amp = mean(obj.spindleEvents(:,4));
-    else
-        obj.methodComparison.fusion_total = 0;
-        obj.methodComparison.fusion_mean_freq = 0;
-        obj.methodComparison.fusion_mean_dur = 0;
-        obj.methodComparison.fusion_mean_amp = 0;
-    end
-    
-    fprintf('Method Comparison:\n');
-    fprintf('  Wavelet: %d spindles\n', obj.methodComparison.wavelet_total);
-    fprintf('  RMS: %d spindles\n', obj.methodComparison.rms_total);
-    fprintf('  Fusion: %d spindles\n', obj.methodComparison.fusion_total);
-end
-
-        function performTopographyAnalysis(obj)
-            % Analyze topographic distribution of spindles
-            fprintf('Performing topography analysis...\n');
+            % Calculate separate statistics for RMS and wavelet methods
+            fprintf('Calculating method comparison statistics...\n');
             
-            topo = struct();
+            obj.methodComparison = struct();
             
-% Only include EEG channels that actually have spindles
-all_channels = obj.channelLabels;
-valid_channels = {};
-
-% Get channels that actually detected spindles
-if ~isempty(obj.spindleEvents)
-    spindle_channels = unique(obj.spindleEvents(:,7));
-    for i = 1:length(spindle_channels)
-        chIdx = spindle_channels(i);
-        if chIdx <= length(all_channels)
-            chName = all_channels{chIdx};
-            % Only include if it's an EEG-like channel
-            if contains(chName, 'F3') || contains(chName, 'F4') || ...
-               contains(chName, 'C3') || contains(chName, 'C4') || ...
-               contains(chName, 'O1') || contains(chName, 'O2') || ...
-               contains(chName, 'Fz') || contains(chName, 'Cz') || ...
-               contains(chName, 'Pz') || contains(chName, 'EEG')
-                valid_channels{end+1} = chName;
-            end
-        end
-    end
-end
-
-% Remove duplicates
-valid_channels = unique(valid_channels);
-            
-            for i = 1:length(valid_channels)
-                chName = valid_channels{i};
-                fieldName = strrep(chName, '-', '_');
-                topo.(fieldName) = struct();
-                topo.(fieldName).channel_name = chName;
-                topo.(fieldName).spindle_count = 0;
-                topo.(fieldName).SO_count = 0;
-                topo.(fieldName).mean_frequency = 0;
-                topo.(fieldName).mean_amplitude = 0;
+            % Wavelet statistics
+            if ~isempty(waveletSpindles)
+                obj.methodComparison.wavelet_total = size(waveletSpindles, 1);
+                obj.methodComparison.wavelet_mean_freq = mean(waveletSpindles(:,6));
+                obj.methodComparison.wavelet_mean_dur = mean(waveletSpindles(:,5));
+                obj.methodComparison.wavelet_mean_amp = mean(waveletSpindles(:,4));
+            else
+                obj.methodComparison.wavelet_total = 0;
+                obj.methodComparison.wavelet_mean_freq = 0;
+                obj.methodComparison.wavelet_mean_dur = 0;
+                obj.methodComparison.wavelet_mean_amp = 0;
             end
             
-            % Count spindles by channel
+            % RMS statistics
+            if ~isempty(rmsSpindles)
+                obj.methodComparison.rms_total = size(rmsSpindles, 1);
+                obj.methodComparison.rms_mean_freq = mean(rmsSpindles(:,6));
+                obj.methodComparison.rms_mean_dur = mean(rmsSpindles(:,5));
+                obj.methodComparison.rms_mean_amp = mean(rmsSpindles(:,4));
+            else
+                obj.methodComparison.rms_total = 0;
+                obj.methodComparison.rms_mean_freq = 0;
+                obj.methodComparison.rms_mean_dur = 0;
+                obj.methodComparison.rms_mean_amp = 0;
+            end
+            
+            % Fusion statistics - Calculate directly from spindleEvents
             if ~isempty(obj.spindleEvents)
-                for i = 1:size(obj.spindleEvents, 1)
-                    chIdx = obj.spindleEvents(i,7);
-                    if chIdx <= length(obj.channelLabels)
-                        chName = obj.channelLabels{chIdx};
-                        fieldName = strrep(chName, '-', '_');
-                        if isfield(topo, fieldName)
-                            topo.(fieldName).spindle_count = topo.(fieldName).spindle_count + 1;
-                            topo.(fieldName).mean_frequency = topo.(fieldName).mean_frequency + obj.spindleEvents(i,6);
-                            topo.(fieldName).mean_amplitude = topo.(fieldName).mean_amplitude + obj.spindleEvents(i,4);
-                        end
-                    end
-                end
+                obj.methodComparison.fusion_total = size(obj.spindleEvents, 1);
+                obj.methodComparison.fusion_mean_freq = mean(obj.spindleEvents(:,6));
+                obj.methodComparison.fusion_mean_dur = mean(obj.spindleEvents(:,5));
+                obj.methodComparison.fusion_mean_amp = mean(obj.spindleEvents(:,4));
+            else
+                obj.methodComparison.fusion_total = 0;
+                obj.methodComparison.fusion_mean_freq = 0;
+                obj.methodComparison.fusion_mean_dur = 0;
+                obj.methodComparison.fusion_mean_amp = 0;
             end
             
-            % Count SOs by channel
-            if ~isempty(obj.SO_events)
-                for i = 1:size(obj.SO_events, 1)
-                    chIdx = obj.SO_events(i,4);
-                    if chIdx <= length(obj.channelLabels)
-                        chName = obj.channelLabels{chIdx};
-                        fieldName = strrep(chName, '-', '_');
-                        if isfield(topo, fieldName)
-                            topo.(fieldName).SO_count = topo.(fieldName).SO_count + 1;
-                        end
-                    end
-                end
-            end
-            
-            % Calculate averages
-            fieldNames = fieldnames(topo);
-            for i = 1:length(fieldNames)
-                fieldName = fieldNames{i};
-                if topo.(fieldName).spindle_count > 0
-                    topo.(fieldName).mean_frequency = topo.(fieldName).mean_frequency / topo.(fieldName).spindle_count;
-                    topo.(fieldName).mean_amplitude = topo.(fieldName).mean_amplitude / topo.(fieldName).spindle_count;
-                end
-            end
-            
-            obj.topographyAnalysis = topo;
-            
-            % Print summary
-            fprintf('Topography Summary:\n');
-            for i = 1:length(fieldNames)
-                fieldName = fieldNames{i};
-                if isfield(topo, fieldName)
-                    chData = topo.(fieldName);
-                    fprintf('  %s: Spindles:%d (Freq:%.1fHz, Amp:%.1f) SO:%d\n', ...
-                        chData.channel_name, chData.spindle_count, ...
-                        chData.mean_frequency, chData.mean_amplitude, chData.SO_count);
-                end
-            end
+            fprintf('Method Comparison:\n');
+            fprintf('  Wavelet: %d spindles\n', obj.methodComparison.wavelet_total);
+            fprintf('  RMS: %d spindles\n', obj.methodComparison.rms_total);
+            fprintf('  Fusion: %d spindles\n', obj.methodComparison.fusion_total);
         end
 
         function performEnhancedAnalysis(obj)
@@ -1160,10 +1946,7 @@ valid_channels = unique(valid_channels);
             % Detect sleep cycles within SPT
             obj.detectSleepCycles();
             
-            % Calculate channel statistics
-            obj.calculateChannelStatistics();
-            
-            % Calculate cycle statistics
+            % Calculate cycle statistics with spindle type information
             obj.calculateCycleStatistics();
         end
 
@@ -1184,7 +1967,7 @@ valid_channels = unique(valid_channels);
                 % Set wake and REM to 0, keep NREM stages as is
                 nrem_hypnogram(nrem_hypnogram == 0 | nrem_hypnogram == 1 | nrem_hypnogram == 5) = 0;
 
-                % Use sleep_cycles function - CORRECTED CALL
+                % Use sleep_cycles function
                 detected_cycles = sleep_cycles(nrem_hypnogram, 'Visible', false);
 
                 % Ensure detected_cycles matches hypnogram length
@@ -1206,146 +1989,62 @@ valid_channels = unique(valid_channels);
                 nCycles = length(unique(obj.sleepCycles(obj.sleepCycles > 0)));
                 fprintf('Detected %d sleep cycles\n', nCycles);
 
-                % Debug: Print cycle distribution
-                cycles = unique(obj.sleepCycles(obj.sleepCycles > 0));
-                for i = 1:length(cycles)
-                    cycle = cycles(i);
-                    epochs = find(obj.sleepCycles == cycle);
-                    if ~isempty(epochs)
-                        fprintf('  Cycle %d: %d epochs (epochs %d to %d, %.1f min)\n', ...
-                            cycle, length(epochs), min(epochs), max(epochs), length(epochs) * 0.5);
-                    end
-                end
-
             catch ME
                 fprintf('Sleep cycle detection failed: %s\n', ME.message);
-                fprintf('Make sure sleep_cycles.m is in your MATLAB path\n');
-                obj.sleepCycles = [];
+                fprintf('Using simple cycle detection method\n');
+                obj.simpleSleepCycleDetection();
             end
         end
 
-function simpleSleepCycleDetection(obj)
-    % Simple fallback sleep cycle detection
-    sptHypnogram = obj.getSPTHypnogram();
-    
-    cycles = zeros(size(sptHypnogram));
-    current_cycle = 0;
-    in_nrem = false;
-    rem_count = 0;
-    
-    for i = 1:length(sptHypnogram)
-        stage = sptHypnogram(i);
-        
-        if (stage == 2 || stage == 3 || stage == 4) && ~in_nrem
-            % Start of NREM period - new cycle
-            current_cycle = current_cycle + 1;
-            in_nrem = true;
-            rem_count = 0;
-        elseif stage == 5 % REM sleep
-            rem_count = rem_count + 1;
-            if rem_count >= 2 % At least 2 REM epochs to count as REM period
-                in_nrem = false;
-            end
-        elseif (stage == 0 || stage == 1) && in_nrem
-            % Wake or N1 - potential cycle boundary
+        function simpleSleepCycleDetection(obj)
+            % Simple fallback sleep cycle detection
+            sptHypnogram = obj.getSPTHypnogram();
+            
+            cycles = zeros(size(sptHypnogram));
+            current_cycle = 0;
             in_nrem = false;
-        end
-        
-        if current_cycle > 0
-            cycles(i) = current_cycle;
-        end
-    end
-    
-    % Map back to full hypnogram indices
-    fullCycles = zeros(size(obj.numericHypnogram));
-    fullCycles(obj.sptStartEpoch:obj.sptEndEpoch) = cycles;
-    obj.sleepCycles = fullCycles;
-
-    nCycles = length(unique(cycles(cycles > 0)));
-    fprintf('Simple cycle detection: %d sleep cycles\n', nCycles);
-end
-
-        function calculateChannelStatistics(obj)
-            % Calculate comprehensive channel statistics
-            if isempty(obj.spindleEvents) && isempty(obj.SO_events)
-                obj.channelStats = struct();
-                return;
-            end
-
-            fprintf('Calculating channel statistics...\n');
-
-            % Get unique channels from both spindles and SOs
-            if ~isempty(obj.spindleEvents)
-                spindle_channels = unique(obj.spindleEvents(:,7));
-            else
-                spindle_channels = [];
-            end
+            rem_count = 0;
             
-            if ~isempty(obj.SO_events)
-                so_channels = unique(obj.SO_events(:,4));
-            else
-                so_channels = [];
-            end
-            
-            channels = unique([spindle_channels; so_channels]);
-            stats = struct();
-
-            for i = 1:length(channels)
-                chIdx = channels(i);
-                if chIdx > length(obj.channelLabels)
-                    continue;
-                end
+            for i = 1:length(sptHypnogram)
+                stage = sptHypnogram(i);
                 
-                channelName = obj.channelLabels{chIdx};
-                fieldName = ['channel_' num2str(chIdx)];
-                
-                % Initialize stats
-                stats.(fieldName) = struct();
-                stats.(fieldName).name = channelName;
-                stats.(fieldName).spindle_count = 0;
-                stats.(fieldName).SO_count = 0;
-                stats.(fieldName).mean_duration = 0;
-                stats.(fieldName).mean_frequency = 0;
-                stats.(fieldName).mean_amplitude = 0;
-                stats.(fieldName).spindle_density = 0;
-                stats.(fieldName).SO_density = 0;
-                
-                % Get spindles for this channel
-                if ~isempty(obj.spindleEvents)
-                    channelSpindles = obj.spindleEvents(obj.spindleEvents(:,7) == chIdx, :);
-                    if ~isempty(channelSpindles)
-                        stats.(fieldName).spindle_count = size(channelSpindles, 1);
-                        stats.(fieldName).mean_duration = mean(channelSpindles(:,5));
-                        stats.(fieldName).mean_frequency = mean(channelSpindles(:,6));
-                        stats.(fieldName).mean_amplitude = mean(channelSpindles(:,4));
+                if (stage == 2 || stage == 3 || stage == 4) && ~in_nrem
+                    % Start of NREM period - new cycle
+                    current_cycle = current_cycle + 1;
+                    in_nrem = true;
+                    rem_count = 0;
+                elseif stage == 5 % REM sleep
+                    rem_count = rem_count + 1;
+                    if rem_count >= 2 % At least 2 REM epochs to count as REM period
+                        in_nrem = false;
                     end
+                elseif (stage == 0 || stage == 1) && in_nrem
+                    % Wake or N1 - potential cycle boundary
+                    in_nrem = false;
                 end
                 
-                % Get SOs for this channel
-                if ~isempty(obj.SO_events)
-                    channelSOs = obj.SO_events(obj.SO_events(:,4) == chIdx, :);
-                    stats.(fieldName).SO_count = size(channelSOs, 1);
-                end
-                
-                % Density calculations
-                totalNREMTime = obj.calculateNREMTime();
-                if totalNREMTime > 0
-                    stats.(fieldName).spindle_density = stats.(fieldName).spindle_count / totalNREMTime;
-                    stats.(fieldName).SO_density = stats.(fieldName).SO_count / totalNREMTime;
+                if current_cycle > 0
+                    cycles(i) = current_cycle;
                 end
             end
+            
+            % Map back to full hypnogram indices
+            fullCycles = zeros(size(obj.numericHypnogram));
+            fullCycles(obj.sptStartEpoch:obj.sptEndEpoch) = cycles;
+            obj.sleepCycles = fullCycles;
 
-            obj.channelStats = stats;
+            nCycles = length(unique(cycles(cycles > 0)));
+            fprintf('Simple cycle detection: %d sleep cycles\n', nCycles);
         end
 
         function calculateCycleStatistics(obj)
-            % Calculate comprehensive cycle statistics
+            % Calculate comprehensive cycle statistics with spindle type information
             if isempty(obj.sleepCycles) || isempty(obj.spindleEvents)
                 obj.cycleStats = struct();
                 return;
             end
 
-            fprintf('Calculating cycle statistics...\n');
+            fprintf('Calculating enhanced cycle statistics...\n');
 
             uniqueCycles = unique(obj.sleepCycles(obj.sleepCycles > 0));
             stats = struct();
@@ -1361,39 +2060,91 @@ end
                 % Calculate cycle duration
                 cycleDuration = length(cycleEpochs) * 0.5; % minutes
                 
-                % Count spindles in this cycle
-                cycleSpindles = 0;
-                for j = 1:size(obj.spindleEvents, 1)
-                    epochNumber = ceil(obj.spindleEvents(j,3) / 30);
-                    if ismember(epochNumber, cycleEpochs)
-                        cycleSpindles = cycleSpindles + 1;
-                    end
-                end
+                % Count spindles and SOs in this cycle with type information
+                cycleStats = obj.countEventsInCycle(cycleEpochs);
                 
-                % Count SOs in this cycle
-                cycleSOs = 0;
-                if ~isempty(obj.SO_events)
-                    for k = 1:size(obj.SO_events, 1)
-                        epochNumber = ceil(obj.SO_events(k,1) / 30);
-                        if ismember(epochNumber, cycleEpochs)
-                            cycleSOs = cycleSOs + 1;
-                        end
-                    end
-                end
-
                 % Store cycle statistics
                 stats.(cycleName) = struct();
                 stats.(cycleName).cycleNumber = cycleNum;
                 stats.(cycleName).startEpoch = min(cycleEpochs);
                 stats.(cycleName).endEpoch = max(cycleEpochs);
                 stats.(cycleName).duration = cycleDuration;
-                stats.(cycleName).spindle_count = cycleSpindles;
-                stats.(cycleName).SO_count = cycleSOs;
-                stats.(cycleName).spindle_density = cycleSpindles / max(cycleDuration, 0.1);
-                stats.(cycleName).SO_density = cycleSOs / max(cycleDuration, 0.1);
+                stats.(cycleName).total_spindles = cycleStats.total_spindles;
+                stats.(cycleName).fast_spindles = cycleStats.fast_spindles;
+                stats.(cycleName).slow_spindles = cycleStats.slow_spindles;
+                stats.(cycleName).SO_count = cycleStats.SO_count;
+                stats.(cycleName).spindle_density = cycleStats.total_spindles / max(cycleDuration, 0.1);
+                stats.(cycleName).fast_density = cycleStats.fast_spindles / max(cycleDuration, 0.1);
+                stats.(cycleName).slow_density = cycleStats.slow_spindles / max(cycleDuration, 0.1);
+                stats.(cycleName).SO_density = cycleStats.SO_count / max(cycleDuration, 0.1);
+                stats.(cycleName).channels = cycleStats.channels;
             end
 
             obj.cycleStats = stats;
+        end
+
+        function cycleStats = countEventsInCycle(obj, cycleEpochs)
+            % Count events in specific sleep cycle with type and channel information
+            cycleStats = struct();
+            cycleStats.total_spindles = 0;
+            cycleStats.fast_spindles = 0;
+            cycleStats.slow_spindles = 0;
+            cycleStats.SO_count = 0;
+            cycleStats.channels = struct();
+            
+            % Count spindles in this cycle
+            if ~isempty(obj.spindleEvents)
+                for i = 1:size(obj.spindleEvents, 1)
+                    epochNumber = ceil(obj.spindleEvents(i,3) / 30);
+                    if ismember(epochNumber, cycleEpochs)
+                        cycleStats.total_spindles = cycleStats.total_spindles + 1;
+                        
+                        % Check spindle type
+                        freq = obj.spindleEvents(i,6);
+                        if freq >= 13 && freq <= 16
+                            cycleStats.fast_spindles = cycleStats.fast_spindles + 1;
+                        elseif freq >= 11 && freq < 13
+                            cycleStats.slow_spindles = cycleStats.slow_spindles + 1;
+                        end
+                        
+                        % Count by channel
+                        chIdx = obj.spindleEvents(i,7);
+                        if chIdx <= length(obj.channelLabels)
+                            chName = obj.channelLabels{chIdx};
+                            fieldName = ['channel_' num2str(chIdx)];
+                            
+                            if ~isfield(cycleStats.channels, fieldName)
+                                cycleStats.channels.(fieldName) = struct();
+                                cycleStats.channels.(fieldName).name = chName;
+                                cycleStats.channels.(fieldName).total_spindles = 0;
+                                cycleStats.channels.(fieldName).fast_spindles = 0;
+                                cycleStats.channels.(fieldName).slow_spindles = 0;
+                            end
+                            
+                            cycleStats.channels.(fieldName).total_spindles = ...
+                                cycleStats.channels.(fieldName).total_spindles + 1;
+                            
+                            if freq >= 13 && freq <= 16
+                                cycleStats.channels.(fieldName).fast_spindles = ...
+                                    cycleStats.channels.(fieldName).fast_spindles + 1;
+                            elseif freq >= 11 && freq < 13
+                                cycleStats.channels.(fieldName).slow_spindles = ...
+                                    cycleStats.channels.(fieldName).slow_spindles + 1;
+                            end
+                        end
+                    end
+                end
+            end
+            
+            % Count SOs in this cycle
+            if ~isempty(obj.SO_events)
+                for i = 1:size(obj.SO_events, 1)
+                    epochNumber = ceil(obj.SO_events(i,1) / 30);
+                    if ismember(epochNumber, cycleEpochs)
+                        cycleStats.SO_count = cycleStats.SO_count + 1;
+                    end
+                end
+            end
         end
 
         function x = applySleepRestriction(obj, x, chIdx)
@@ -1723,63 +2474,49 @@ end
             end
         end
 
-        function saveResults(obj, outputFile)
-            % Save comprehensive consolidated results
-            if isempty(obj.spindleEvents)
-                obj.saveEmptyResults(outputFile);
-                return;
-            end
+        % NEW RESULT TABLE METHODS WITH ALL IMPROVEMENTS
+        function [fusionTable, methodTable, channelStatsTable, stageStatsTable, cycleStatsTable, temporalRelationsTable, qualityTable] = buildConsolidatedResultTables(obj)
+            % Build all consolidated result tables with improvements
 
-            fprintf('Saving COMPREHENSIVE consolidated results...\n');
-            fprintf('Analysis performed only on Sleep Period Time: %.1f minutes\n', obj.sptDuration/60);
+               fprintf('Building comprehensive consolidated result tables...\n');
 
-            % Build all consolidated result tables
-            [fusionTable, methodTable, topographyTable, channelStats, stageStats, cycleStats, qualityTable] = ...
-                obj.buildConsolidatedResultTables();
+    % 1. FUSION DETECTION METRICS TABLE
+    fusionTable = obj.buildFusionMetricsTable();
 
-            % Write all sheets to Excel
-            obj.writeConsolidatedResultsToExcel(outputFile, fusionTable, methodTable, topographyTable, ...
-                channelStats, stageStats, cycleStats, qualityTable);
-        end
-
-function [fusionTable, methodTable, topographyTable, channelStats, stageStats, cycleStats, qualityTable] = buildConsolidatedResultTables(obj)
-    % Build all consolidated result tables
-
-    fprintf('Building consolidated result tables...\n');
-
-            % 1. FUSION DETECTION METRICS TABLE
-            fusionTable = obj.buildFusionMetricsTable();
-
-                % 2. METHOD COMPARISON TABLE (NEW)
+    % 2. METHOD COMPARISON TABLE
     methodTable = obj.buildMethodComparisonTable();
 
-            % 3. TOPOGRAPHY ANALYSIS TABLE
-            topographyTable = obj.buildTopographyTable();
+    % 3. CHANNEL STATISTICS TABLE (overall channel summaries)
+    channelStatsTable = obj.buildChannelStatsTable();
 
+    % 4. STAGE STATISTICS TABLE (NOW: by channel)
+    stageStatsTable = obj.buildStageStatsTable();
 
-            % 4. CHANNEL STATISTICS
-            channelStats = obj.buildChannelStatsTable();
+    % 5. CYCLE STATISTICS TABLE (NOW: by channel and stage)
+    cycleStatsTable = obj.buildCycleStatsTable();
 
-            % 5. STAGE STATISTICS
-            stageStats = obj.buildStageStatsTable();
+    % 6. TEMPORAL RELATIONSHIPS TABLE
+    temporalRelationsTable = obj.buildTemporalRelationshipsTable();
 
-            % 6. CYCLE STATISTICS
-            cycleStats = obj.buildCycleStatsTable();
+    % 7. DATA QUALITY TABLE
+    qualityTable = obj.buildQualityTable();
 
-            % 7. DATA QUALITY
-            qualityTable = obj.buildQualityTable();
-        end
+end
 
         function fusionTable = buildFusionMetricsTable(obj)
-            % Build fusion detection metrics table
+            % Build fusion detection metrics table with spindle type information
             fprintf('Building fusion metrics table...\n');
 
             metrics = obj.fusionMetrics;
             
             data = {
                 'Total_Spindles', metrics.total_spindles;
+                'Fast_Spindles', metrics.fast_spindles;
+                'Slow_Spindles', metrics.slow_spindles;
                 'Total_SO', metrics.total_SO;
                 'Spindle_Density_perMin', metrics.spindle_density;
+                'Fast_Spindle_Density_perMin', metrics.fast_density;
+                'Slow_Spindle_Density_perMin', metrics.slow_density;
                 'SO_Density_perMin', metrics.SO_density;
                 'Mean_Frequency_Hz', metrics.mean_frequency;
                 'Std_Frequency_Hz', metrics.std_frequency;
@@ -1794,161 +2531,368 @@ function [fusionTable, methodTable, topographyTable, channelStats, stageStats, c
             fusionTable = cell2table(data, 'VariableNames', {'Metric', 'Value'});
         end
         
-function methodTable = buildMethodComparisonTable(obj)
-    % Build method comparison table
-    fprintf('Building method comparison table...\n');
+        function methodTable = buildMethodComparisonTable(obj)
+            % Build method comparison table
+            fprintf('Building method comparison table...\n');
 
-    if isempty(obj.methodComparison)
-        methodTable = table();
+            if isempty(obj.methodComparison)
+                methodTable = table();
+                return;
+            end
+
+            methods = {'Wavelet'; 'RMS'; 'Fusion'};
+            total_spindles = [
+                obj.methodComparison.wavelet_total;
+                obj.methodComparison.rms_total; 
+                obj.methodComparison.fusion_total
+            ];
+            mean_frequency = [
+                obj.methodComparison.wavelet_mean_freq;
+                obj.methodComparison.rms_mean_freq;
+                obj.methodComparison.fusion_mean_freq
+            ];
+            mean_duration = [
+                obj.methodComparison.wavelet_mean_dur;
+                obj.methodComparison.rms_mean_dur;
+                obj.methodComparison.fusion_mean_dur
+            ];
+            mean_amplitude = [
+                obj.methodComparison.wavelet_mean_amp;
+                obj.methodComparison.rms_mean_amp;
+                obj.methodComparison.fusion_mean_amp
+            ];
+
+            methodTable = table(methods, total_spindles, mean_frequency, mean_duration, mean_amplitude, ...
+                'VariableNames', {'Method', 'Total_Spindles', 'Mean_Frequency_Hz', 'Mean_Duration_s', 'Mean_Amplitude'});
+        end
+
+        function channelStatsTable = buildChannelStatsTable(obj)
+    % Build regional channel statistics table with stage breakdown
+    fprintf('Building regional channel statistics table with stage breakdown...\n');
+
+    if isempty(obj.channelStats)
+        channelStatsTable = table();
         return;
     end
 
-    methods = {'Wavelet'; 'RMS'; 'Fusion'};
-    total_spindles = [
-        obj.methodComparison.wavelet_total;
-        obj.methodComparison.rms_total; 
-        obj.methodComparison.fusion_total
-    ];
-    mean_frequency = [
-        obj.methodComparison.wavelet_mean_freq;
-        obj.methodComparison.rms_mean_freq;
-        obj.methodComparison.fusion_mean_freq
-    ];
-    mean_duration = [
-        obj.methodComparison.wavelet_mean_dur;
-        obj.methodComparison.rms_mean_dur;
-        obj.methodComparison.fusion_mean_dur
-    ];
-    mean_amplitude = [
-        obj.methodComparison.wavelet_mean_amp;
-        obj.methodComparison.rms_mean_amp;
-        obj.methodComparison.fusion_mean_amp
-    ];
+    stats = obj.channelStats;
+    fieldNames = fieldnames(stats)';
+    stages = {'N1', 'N2', 'N3', 'REM'};
+    
+    data = {};
+    for i = 1:length(fieldNames)
+        fieldName = fieldNames{i};
+        if isfield(stats, fieldName)
+            regionData = stats.(fieldName);
+            
+            % Main region summary row
+            data{end+1, 1} = regionData.region_name;
+            data{end, 2} = 'SUMMARY';
+            data{end, 3} = strjoin(regionData.channels, ', ');
+            data{end, 4} = regionData.total_spindles;
+            data{end, 5} = regionData.fast_spindles;
+            data{end, 6} = regionData.slow_spindles;
+            data{end, 7} = regionData.SO_count;
+            data{end, 8} = regionData.mean_frequency;
+            data{end, 9} = regionData.mean_duration;
+            data{end, 10} = regionData.mean_amplitude;
+            data{end, 11} = regionData.fast_mean_freq;
+            data{end, 12} = regionData.slow_mean_freq;
+            data{end, 13} = regionData.spindle_density;
+            data{end, 14} = regionData.fast_density;
+            data{end, 15} = regionData.slow_density;
+            data{end, 16} = regionData.SO_density;
+            
+            % Stage-specific rows
+            for stage_idx = 1:length(stages)
+                stage = stages{stage_idx};
+                data{end+1, 1} = regionData.region_name;
+                data{end, 2} = stage;
+                data{end, 3} = strjoin(regionData.channels, ', ');
+                data{end, 4} = regionData.(['total_' stage]);
+                data{end, 5} = regionData.(['fast_' stage]);
+                data{end, 6} = regionData.(['slow_' stage]);
+                data{end, 7} = regionData.(['SO_' stage]);
+                data{end, 8} = NaN; % Frequency not calculated per stage
+                data{end, 9} = NaN; % Duration not calculated per stage
+                data{end, 10} = NaN; % Amplitude not calculated per stage
+                data{end, 11} = NaN; % Fast freq not calculated per stage
+                data{end, 12} = NaN; % Slow freq not calculated per stage
+                data{end, 13} = regionData.([stage '_spindle_density']);
+                data{end, 14} = regionData.([stage '_fast_density']);
+                data{end, 15} = regionData.([stage '_slow_density']);
+                data{end, 16} = regionData.([stage '_SO_density']);
+            end
+        end
+    end
 
-    methodTable = table(methods, total_spindles, mean_frequency, mean_duration, mean_amplitude, ...
-        'VariableNames', {'Method', 'Total_Spindles', 'Mean_Frequency_Hz', 'Mean_Duration_s', 'Mean_Amplitude'});
+    if isempty(data)
+        channelStatsTable = table();
+    else
+        channelStatsTable = cell2table(data, 'VariableNames', {
+            'Region', 'Breakdown', 'Channels', 'Total_Spindles', 'Fast_Spindles', 'Slow_Spindles', 'SO_Count', ...
+            'Mean_Frequency_Hz', 'Mean_Duration_s', 'Mean_Amplitude', ...
+            'Fast_Mean_Freq_Hz', 'Slow_Mean_Freq_Hz', ...
+            'Spindle_Density_perMin', 'Fast_Density_perMin', 'Slow_Density_perMin', 'SO_Density_perMin'
+            });
+    end
 end
 
-        function topographyTable = buildTopographyTable(obj)
-            % Build topography analysis table
-            fprintf('Building topography analysis table...\n');
+        function stageStatsTable = buildStageStatsTable(obj)
+    % Build enhanced stage statistics table with channel breakdown AND totals
+    fprintf('Building enhanced stage statistics table with totals...\n');
 
-            if isempty(obj.topographyAnalysis)
-                topographyTable = table();
-                return;
-            end
-
-            topo = obj.topographyAnalysis;
-            fieldNames = fieldnames(topo)';
+    % Use the pre-computed table that already includes channel breakdown + totals
+    if isempty(obj.stageStatsTable) || height(obj.stageStatsTable) == 0
+        % Fallback: create basic table if the enhanced one isn't available
+        stages = {'N1', 'N2', 'N3', 'REM'};
+        data = {};
+        
+        for i = 1:length(stages)
+            stage = stages{i};
+            stageNum = obj.getStageNumber(stage);
             
-            data = {};
-            for i = 1:length(fieldNames)
-                fieldName = fieldNames{i};
-                if isfield(topo, fieldName)
-                    chData = topo.(fieldName);
-                    data{end+1, 1} = chData.channel_name;
-                    data{end, 2} = chData.spindle_count;
-                    data{end, 3} = chData.SO_count;
-                    data{end, 4} = chData.mean_frequency;
-                    data{end, 5} = chData.mean_amplitude;
-                end
-            end
-
-            if isempty(data)
-                topographyTable = table();
-            else
-                topographyTable = cell2table(data, 'VariableNames', {
-                    'Channel', 'Spindle_Count', 'SO_Count', 'Mean_Frequency_Hz', 'Mean_Amplitude'
-                    });
-            end
-        end
-
-        function channelStats = buildChannelStatsTable(obj)
-            % Build channel statistics table
-            fprintf('Building channel statistics table...\n');
-
-            if isempty(obj.channelStats)
-                channelStats = table();
-                return;
-            end
-
-            stats = obj.channelStats;
-            fieldNames = fieldnames(stats)';
+            total_spindles = obj.countSpindlesInStage(stageNum);
+            fast_spindles = obj.countFastSpindlesInStage(stageNum);
+            slow_spindles = obj.countSlowSpindlesInStage(stageNum);
             
-            data = {};
-            for i = 1:length(fieldNames)
-                fieldName = fieldNames{i};
-                if isfield(stats, fieldName)
-                    chData = stats.(fieldName);
-                    data{end+1, 1} = chData.name;
-                    data{end, 2} = chData.spindle_count;
-                    data{end, 3} = chData.SO_count;
-                    data{end, 4} = chData.mean_duration;
-                    data{end, 5} = chData.mean_frequency;
-                    data{end, 6} = chData.mean_amplitude;
-                    data{end, 7} = chData.spindle_density;
-                    data{end, 8} = chData.SO_density;
-                end
+            stageDurations = obj.calculateStageDurations();
+            stage_duration = stageDurations.(stage);
+            
+            spindle_density = 0;
+            if stage_duration > 0
+                spindle_density = total_spindles / stage_duration;
             end
-
-            if isempty(data)
-                channelStats = table();
-            else
-                channelStats = cell2table(data, 'VariableNames', {
-                    'Channel', 'Spindle_Count', 'SO_Count', 'Mean_Duration_s', ...
-                    'Mean_Frequency_Hz', 'Mean_Amplitude', 'Spindle_Density_perMin', 'SO_Density_perMin'
-                    });
-            end
+            
+            data{end+1, 1} = stage;
+            data{end, 2} = total_spindles;
+            data{end, 3} = fast_spindles;
+            data{end, 4} = slow_spindles;
+            data{end, 5} = stage_duration;
+            data{end, 6} = spindle_density;
         end
-
-        function stageStats = buildStageStatsTable(obj)
-            % Build stage statistics table
-            fprintf('Building stage statistics table...\n');
-
-            stages = {'N1', 'N2', 'N3', 'REM'};
-            nStages = length(stages);
-
-            stageNames = cell(nStages, 1);
-            spindleCounts = zeros(nStages, 1);
-            SOCounts = zeros(nStages, 1);
-            stageTimes = zeros(nStages, 1);
-
-            for i = 1:nStages
-                stage = stages{i};
-                stageNames{i} = stage;
-                stageNum = obj.getStageNumber(stage);
-
-                % Count spindles in this stage
-                spindleCounts(i) = obj.countSpindlesInStage(stageNum);
-                SOCounts(i) = obj.countSOsInStage(stageNum);
-
-                % Calculate stage time
-                if ~isempty(obj.numericHypnogram)
-                    stageEpochs = sum(obj.numericHypnogram == stageNum);
-                    stageTimes(i) = stageEpochs * 30 / 60; % minutes
-                else
-                    stageTimes(i) = 0;
-                end
-            end
-
-            % Calculate densities
-            spindleDensity = zeros(nStages, 1);
-            SODensity = zeros(nStages, 1);
-
-            for i = 1:nStages
-                if stageTimes(i) > 0
-                    spindleDensity(i) = spindleCounts(i) / stageTimes(i);
-                    SODensity(i) = SOCounts(i) / stageTimes(i);
-                end
-            end
-
-            stageStats = table(...
-                stageNames, spindleCounts, SOCounts, stageTimes, spindleDensity, SODensity, ...
-                'VariableNames', {
-                'Stage', 'Spindle_Count', 'SO_Count', 'StageTime_min', 'Spindle_Density_perMin', 'SO_Density_perMin'
+        
+        if isempty(data)
+            stageStatsTable = table();
+        else
+            stageStatsTable = cell2table(data, 'VariableNames', {
+                'Stage', 'Total_Spindles', 'Fast_Spindles', 'Slow_Spindles', ...
+                'Stage_Duration_min', 'Spindle_Density_perMin'
                 });
         end
+    else
+        % Use the enhanced table with channel breakdown and totals
+        stageStatsTable = obj.stageStatsTable;
+    end
+    
+    fprintf('Stage statistics table: %d rows\n', height(stageStatsTable));
+end
 
+function cycleStatsTable = buildCycleStatsTable(obj)
+    % Build enhanced cycle statistics table with channel-stage breakdown AND totals
+    fprintf('Building enhanced cycle statistics table with totals...\n');
+
+    % Use the pre-computed table that already includes channel-stage breakdown + totals
+    if isempty(obj.cycleStatsTable) || height(obj.cycleStatsTable) == 0
+        % Fallback: create basic table if the enhanced one isn't available
+        if isempty(obj.cycleStats)
+            cycleStatsTable = table();
+            return;
+        end
+        
+        stats = obj.cycleStats;
+        fieldNames = fieldnames(stats)';
+        
+        data = {};
+        for i = 1:length(fieldNames)
+            fieldName = fieldNames{i};
+            if isfield(stats, fieldName)
+                cycleData = stats.(fieldName);
+                data{end+1, 1} = cycleData.cycleNumber;
+                data{end, 2} = cycleData.startEpoch;
+                data{end, 3} = cycleData.endEpoch;
+                data{end, 4} = cycleData.duration;
+                data{end, 5} = cycleData.total_spindles;
+                data{end, 6} = cycleData.fast_spindles;
+                data{end, 7} = cycleData.slow_spindles;
+                data{end, 8} = cycleData.SO_count;
+                data{end, 9} = cycleData.spindle_density;
+            end
+        end
+        
+        if isempty(data)
+            cycleStatsTable = table();
+        else
+            cycleStatsTable = cell2table(data, 'VariableNames', {
+                'CycleNumber', 'StartEpoch', 'EndEpoch', 'Duration_min', ...
+                'Total_Spindles', 'Fast_Spindles', 'Slow_Spindles', 'SO_Count', ...
+                'Spindle_Density_perMin'
+                });
+        end
+    else
+        % Use the enhanced table with channel-stage breakdown and totals
+        cycleStatsTable = obj.cycleStatsTable;
+    end
+    
+    fprintf('Cycle statistics table: %d rows\n', height(cycleStatsTable));
+end
+
+        function temporalRelationsTable = buildTemporalRelationshipsTable(obj)
+            % Build comprehensive SO-spindle temporal relationships table
+            fprintf('Building temporal relationships table...\n');
+
+            if isempty(obj.temporalRelations) || ~isfield(obj.temporalRelations, 'SO_count')
+                temporalRelationsTable = table();
+                return;
+            end
+
+            rel = obj.temporalRelations;
+            
+            data = {
+                'Total_SO_Count', rel.SO_count;
+                'Total_Spindle_Count', rel.spindle_count;
+                'Fast_Spindle_Count', rel.fast_spindle_count;
+                'Slow_Spindle_Count', rel.slow_spindle_count;
+                'Mean_Time_Difference_s', rel.mean_time_diff;
+                'Std_Time_Difference_s', rel.std_time_diff;
+                'Median_Time_Difference_s', rel.median_time_diff;
+                'Mean_Coupling_Strength', rel.mean_coupling_strength;
+                'Early_Coupled_Count', rel.early_coupled_count;
+                'Late_Coupled_Count', rel.late_coupled_count;
+                'Tightly_Coupled_Count', rel.tightly_coupled_count;
+                'Early_Coupled_Percent', rel.early_coupled_percent;
+                'Late_Coupled_Percent', rel.late_coupled_percent;
+                'Tightly_Coupled_Percent', rel.tightly_coupled_percent;
+                'Fast_Spindle_Mean_Time_Diff_s', rel.fast_mean_time_diff;
+                'Slow_Spindle_Mean_Time_Diff_s', rel.slow_mean_time_diff;
+                'Fast_Spindle_Mean_Coupling', rel.fast_mean_coupling;
+                'Slow_Spindle_Mean_Coupling', rel.slow_mean_coupling;
+                };
+
+            temporalRelationsTable = cell2table(data, 'VariableNames', {'Parameter', 'Value'});
+        end
+
+        function qualityTable = buildQualityTable(obj)
+            % Build data quality summary table
+            fprintf('Building quality table...\n');
+
+            totalNREMTime = obj.calculateNREMTime();
+            
+            qualityData = {
+                'Total_SPT_Time_min', obj.sptDuration / 60;
+                'Total_NREM_Time_min', totalNREMTime;
+                'Artifact_Free_Percent', obj.getFieldSafe(obj.cleaningSummary, 'cleanDataPercentage', 0);
+                'Artifact_Percent', obj.getFieldSafe(obj.cleaningSummary, 'artifactPercentage', 0);
+                'ECG_Decontamination_Applied', obj.getFieldSafe(obj.cleaningSummary, 'ecgDecontaminationApplied', false);
+                'Total_Artifacts', obj.getFieldSafe(obj.cleaningSummary, 'totalArtifacts', 0);
+                'Total_Spindles', size(obj.spindleEvents, 1);
+                'Total_Fast_Spindles', size(obj.fastSpindleEvents, 1);
+                'Total_Slow_Spindles', size(obj.slowSpindleEvents, 1);
+                'Total_SO', size(obj.SO_events, 1);
+                'Spindle_Density', size(obj.spindleEvents, 1) / max(totalNREMTime, 0.1);
+                'Fast_Spindle_Density', size(obj.fastSpindleEvents, 1) / max(totalNREMTime, 0.1);
+                'Slow_Spindle_Density', size(obj.slowSpindleEvents, 1) / max(totalNREMTime, 0.1);
+                'SO_Density', size(obj.SO_events, 1) / max(totalNREMTime, 0.1);
+                'Mean_Spindle_Frequency_Hz', obj.fusionMetrics.mean_frequency;
+                'Mean_Spindle_Duration_s', obj.fusionMetrics.mean_duration;
+                };
+
+            qualityTable = cell2table(qualityData, 'VariableNames', {'Parameter', 'Value'});
+        end
+
+        function writeConsolidatedResultsToExcel(obj, outputFile, fusionTable, methodTable, channelStatsTable, ...
+                stageStatsTable, cycleStatsTable, temporalRelationsTable, qualityTable)
+            % Write all consolidated tables to Excel file
+
+            fprintf('Writing comprehensive consolidated results to Excel...\n');
+
+            try
+                if exist(outputFile, 'file')
+                    delete(outputFile);
+                end
+
+                if ~isempty(fusionTable) && height(fusionTable) > 0
+                    writetable(fusionTable, outputFile, 'Sheet', 'Fusion_Metrics');
+                end
+      
+                if ~isempty(methodTable) && height(methodTable) > 0
+                    writetable(methodTable, outputFile, 'Sheet', 'Method_Comparison');
+                end
+
+                if ~isempty(channelStatsTable) && height(channelStatsTable) > 0
+                    writetable(channelStatsTable, outputFile, 'Sheet', 'Channel_Statistics');
+                end
+
+                if ~isempty(stageStatsTable) && height(stageStatsTable) > 0
+                    writetable(stageStatsTable, outputFile, 'Sheet', 'Stage_Statistics');
+                end
+
+                if ~isempty(cycleStatsTable) && height(cycleStatsTable) > 0
+                    writetable(cycleStatsTable, outputFile, 'Sheet', 'Cycle_Statistics');
+                end
+
+                if ~isempty(temporalRelationsTable) && height(temporalRelationsTable) > 0
+                    writetable(temporalRelationsTable, outputFile, 'Sheet', 'Temporal_Relationships');
+                end
+
+                if ~isempty(qualityTable) && height(qualityTable) > 0
+                    writetable(qualityTable, outputFile, 'Sheet', 'Data_Quality');
+                end
+
+                fprintf('Successfully saved comprehensive results to: %s\n', outputFile);
+
+            catch ME
+                fprintf('Error writing Excel file: %s\n', ME.message);
+                rethrow(ME);
+            end
+        end
+
+        function saveResults(obj, outputFile)
+            % Save comprehensive consolidated results
+            if isempty(obj.spindleEvents)
+                obj.saveEmptyResults(outputFile);
+                return;
+            end
+
+            fprintf('Saving COMPREHENSIVE consolidated results...\n');
+            fprintf('Analysis performed only on Sleep Period Time: %.1f minutes\n', obj.sptDuration/60);
+
+            % Build all consolidated result tables
+            [fusionTable, methodTable, channelStatsTable, stageStatsTable, cycleStatsTable, temporalRelationsTable, qualityTable] = ...
+                obj.buildConsolidatedResultTables();
+
+            % Write all sheets to Excel
+            obj.writeConsolidatedResultsToExcel(outputFile, fusionTable, methodTable, channelStatsTable, ...
+                stageStatsTable, cycleStatsTable, temporalRelationsTable, qualityTable);
+        end
+
+        function saveEmptyResults(obj, outputFile)
+            % Save empty results when no spindles detected
+            warning('No spindles to save.');
+
+            emptyTable = table();
+
+            writetable(emptyTable, outputFile, 'Sheet', 'Fusion_Metrics');
+            writetable(emptyTable, outputFile, 'Sheet', 'Method_Comparison');
+            writetable(emptyTable, outputFile, 'Sheet', 'Channel_Statistics');
+            writetable(emptyTable, outputFile, 'Sheet', 'Stage_Statistics');
+            writetable(emptyTable, outputFile, 'Sheet', 'Cycle_Statistics');
+            writetable(emptyTable, outputFile, 'Sheet', 'Temporal_Relationships');
+            writetable(emptyTable, outputFile, 'Sheet', 'Data_Quality');
+
+            fprintf('Saved empty results to: %s\n', outputFile);
+        end
+
+        function value = getFieldSafe(~, structure, fieldName, defaultValue)
+            % Safely get field value with default
+            if isfield(structure, fieldName)
+                value = structure.(fieldName);
+            else
+                value = defaultValue;
+            end
+        end
+
+        % Keep all original counting methods
         function count = countSpindlesInStage(obj, stageNum)
             % Count spindles in specific sleep stage
             count = 0;
@@ -1990,140 +2934,5 @@ end
                 otherwise, stageNum = 0;
             end
         end
-
-        function cycleStats = buildCycleStatsTable(obj)
-            % Build cycle statistics table
-            fprintf('Building cycle statistics table...\n');
-
-            if isempty(obj.cycleStats)
-                cycleStats = table();
-                return;
-            end
-
-            stats = obj.cycleStats;
-            fieldNames = fieldnames(stats)';
-            
-            data = {};
-            for i = 1:length(fieldNames)
-                fieldName = fieldNames{i};
-                if isfield(stats, fieldName)
-                    cycleData = stats.(fieldName);
-                    data{end+1, 1} = cycleData.cycleNumber;
-                    data{end, 2} = cycleData.startEpoch;
-                    data{end, 3} = cycleData.endEpoch;
-                    data{end, 4} = cycleData.duration;
-                    data{end, 5} = cycleData.spindle_count;
-                    data{end, 6} = cycleData.SO_count;
-                    data{end, 7} = cycleData.spindle_density;
-                    data{end, 8} = cycleData.SO_density;
-                end
-            end
-
-            if isempty(data)
-                cycleStats = table();
-            else
-                cycleStats = cell2table(data, 'VariableNames', {
-                    'CycleNumber', 'StartEpoch', 'EndEpoch', 'Duration_min', ...
-                    'Spindle_Count', 'SO_Count', 'Spindle_Density_perMin', 'SO_Density_perMin'
-                    });
-            end
-        end
-
-        function qualityTable = buildQualityTable(obj)
-            % Build data quality summary table
-            fprintf('Building quality table...\n');
-
-            totalNREMTime = obj.calculateNREMTime();
-            
-            qualityData = {
-                'Total_SPT_Time_min', obj.sptDuration / 60;
-                'Total_NREM_Time_min', totalNREMTime;
-                'Artifact_Free_Percent', obj.getFieldSafe(obj.cleaningSummary, 'cleanDataPercentage', 0);
-                'Artifact_Percent', obj.getFieldSafe(obj.cleaningSummary, 'artifactPercentage', 0);
-                'ECG_Decontamination_Applied', obj.getFieldSafe(obj.cleaningSummary, 'ecgDecontaminationApplied', false);
-                'Total_Artifacts', obj.getFieldSafe(obj.cleaningSummary, 'totalArtifacts', 0);
-                'Total_Spindles', size(obj.spindleEvents, 1);
-                'Total_SO', size(obj.SO_events, 1);
-                'Spindle_Density', size(obj.spindleEvents, 1) / max(totalNREMTime, 0.1);
-                'SO_Density', size(obj.SO_events, 1) / max(totalNREMTime, 0.1);
-                'Mean_Spindle_Frequency_Hz', obj.fusionMetrics.mean_frequency;
-                'Mean_Spindle_Duration_s', obj.fusionMetrics.mean_duration;
-                };
-
-            qualityTable = cell2table(qualityData, 'VariableNames', {'Parameter', 'Value'});
-        end
-
-function writeConsolidatedResultsToExcel(obj, outputFile, fusionTable, methodTable, topographyTable, ...
-        channelStats, stageStats, cycleStats, qualityTable)
-            % Write all consolidated tables to Excel file
-
-            fprintf('Writing comprehensive consolidated results to Excel...\n');
-
-            try
-                if exist(outputFile, 'file')
-                    delete(outputFile);
-                end
-
-                if ~isempty(fusionTable) && height(fusionTable) > 0
-                    writetable(fusionTable, outputFile, 'Sheet', 'Fusion_Metrics');
-                end
-      
-        if ~isempty(methodTable) && height(methodTable) > 0
-            writetable(methodTable, outputFile, 'Sheet', 'Method_Comparison');
-        end
-
-                if ~isempty(topographyTable) && height(topographyTable) > 0
-                    writetable(topographyTable, outputFile, 'Sheet', 'Topography_Analysis');
-                end
-
-                if ~isempty(channelStats) && height(channelStats) > 0
-                    writetable(channelStats, outputFile, 'Sheet', 'Channel_Statistics');
-                end
-
-                if ~isempty(stageStats) && height(stageStats) > 0
-                    writetable(stageStats, outputFile, 'Sheet', 'Stage_Statistics');
-                end
-
-                if ~isempty(cycleStats) && height(cycleStats) > 0
-                    writetable(cycleStats, outputFile, 'Sheet', 'Cycle_Statistics');
-                end
-
-                if ~isempty(qualityTable) && height(qualityTable) > 0
-                    writetable(qualityTable, outputFile, 'Sheet', 'Data_Quality');
-                end
-
-                fprintf('Successfully saved comprehensive results to: %s\n', outputFile);
-
-            catch ME
-                fprintf('Error writing Excel file: %s\n', ME.message);
-                rethrow(ME);
-            end
-        end
-
-        function saveEmptyResults(obj, outputFile)
-            % Save empty results when no spindles detected
-            warning('No spindles to save.');
-
-            emptyTable = table();
-
-            writetable(emptyTable, outputFile, 'Sheet', 'Fusion_Metrics');
-            writetable(emptyTable, outputFile, 'Sheet', 'Topography_Analysis');
-            writetable(emptyTable, outputFile, 'Sheet', 'Channel_Statistics');
-            writetable(emptyTable, outputFile, 'Sheet', 'Stage_Statistics');
-            writetable(emptyTable, outputFile, 'Sheet', 'Cycle_Statistics');
-            writetable(emptyTable, outputFile, 'Sheet', 'Data_Quality');
-
-            fprintf('Saved empty results to: %s\n', outputFile);
-        end
-
-        function value = getFieldSafe(~, structure, fieldName, defaultValue)
-            % Safely get field value with default
-            if isfield(structure, fieldName)
-                value = structure.(fieldName);
-            else
-                value = defaultValue;
-            end
-        end
-
     end
 end
