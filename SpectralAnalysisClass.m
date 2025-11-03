@@ -1200,73 +1200,83 @@ end
         end
 
         function calculateStageSpecificPSD(obj, channelData, channelName, fs, freqBands)
-            % Enhanced stage-specific analysis with relative power
-            % ONLY includes sleep stages + WASO, NOT general wake
-            if isempty(obj.numericHypnogram)
-                fprintf('  No hypnogram available for stage-specific analysis\n');
-                return;
-            end
+    % Enhanced stage-specific analysis with relative power
+    % ONLY includes sleep stages + WASO, NOT general wake
+    if isempty(obj.numericHypnogram)
+        fprintf('  No hypnogram available for stage-specific analysis\n');
+        return;
+    end
+    
+    samplesPerEpoch = 30 * fs;
+    numCompleteEpochs = min(floor(length(channelData) / samplesPerEpoch), length(obj.numericHypnogram));
+    
+    % Initialize stage masks if not already done
+    if isempty(obj.stageMasks)
+        obj.initializeStageMasks(numCompleteEpochs);
+    end
+    
+    % Only include sleep stages + WASO, NOT general wake
+    stages = {'N1', 'N2', 'N3', 'REM', 'WASO'}; % NO 'W'
+    
+    sanitizedName = obj.sanitizeFieldName(channelName);
+    
+    % Initialize structures in the CORRECT location (bandPower, not sleepStages)
+    if ~isfield(obj.spectralResults.bandPower, sanitizedName)
+        obj.spectralResults.bandPower.(sanitizedName) = struct();
+    end
+    if ~isfield(obj.spectralResults.relativePower, sanitizedName)
+        obj.spectralResults.relativePower.(sanitizedName) = struct();
+    end
+    if ~isfield(obj.spectralResults.relativePower.(sanitizedName), 'stages')
+        obj.spectralResults.relativePower.(sanitizedName).stages = struct();
+    end
+    
+    fprintf('  Stage-specific analysis for %s (%d epochs)\n', channelName, numCompleteEpochs);
+    
+    for s = 1:length(stages)
+        stage = stages{s};
+        stageMask = obj.stageMasks.(stage);
+        
+        % Count epochs for this stage
+        stageEpochs = sum(stageMask(1:numCompleteEpochs));
+        
+        if stageEpochs > 0
+            fprintf('    %s: %d epochs\n', stage, stageEpochs);
             
-            samplesPerEpoch = 30 * fs;
-            numCompleteEpochs = min(floor(length(channelData) / samplesPerEpoch), length(obj.numericHypnogram));
-            
-            % Initialize stage masks if not already done
-            if isempty(obj.stageMasks)
-                obj.initializeStageMasks(numCompleteEpochs);
-            end
-            
-            % Only include sleep stages + WASO, NOT general wake
-            stages = {'N1', 'N2', 'N3', 'REM', 'WASO'}; % NO 'W'
-            
-            sanitizedName = obj.sanitizeFieldName(channelName);
-            obj.spectralResults.sleepStages.(sanitizedName) = struct();
-            
-            % Initialize relative power structure for stages
-            if ~isfield(obj.spectralResults.relativePower.(sanitizedName), 'stages')
-                obj.spectralResults.relativePower.(sanitizedName).stages = struct();
-            end
-            
-            fprintf('  Stage-specific analysis for %s (%d epochs)\n', channelName, numCompleteEpochs);
-            
-            for s = 1:length(stages)
-                stage = stages{s};
-                stageMask = obj.stageMasks.(stage);
-                
-                % Count epochs for this stage
-                stageEpochs = sum(stageMask(1:numCompleteEpochs));
-                
-                if stageEpochs > 0
-                    fprintf('    %s: %d epochs\n', stage, stageEpochs);
+            % Extract data for this stage
+            stageData = [];
+            for epoch = 1:numCompleteEpochs
+                if stageMask(epoch)
+                    startSample = (epoch-1) * samplesPerEpoch + 1;
+                    endSample = min(epoch * samplesPerEpoch, length(channelData));
+                    epochData = channelData(startSample:endSample);
                     
-                    % Extract data for this stage
-                    stageData = [];
-                    for epoch = 1:numCompleteEpochs
-                        if stageMask(epoch)
-                            startSample = (epoch-1) * samplesPerEpoch + 1;
-                            endSample = min(epoch * samplesPerEpoch, length(channelData));
-                            epochData = channelData(startSample:endSample);
-                            
-                            % Only include if not mostly artifacts
-                            if sum(isnan(epochData)) / length(epochData) < 0.5
-                                stageData = [stageData, epochData];
-                            end
-                        end
-                    end
-                    
-                    if length(stageData) > 10 * fs % At least 10 seconds of data
-                        [stagePSD, frequencies] = obj.calculateAdvancedPSD(stageData, fs);
-                        [stageBandPower, stageTotalPower] = obj.calculateBandPower(stagePSD, frequencies, freqBands);
-                        stageRelativePower = obj.calculateRelativePower(stageBandPower, stageTotalPower, freqBands);
-                        
-                        % Store both absolute and relative power
-                        obj.spectralResults.sleepStages.(sanitizedName).(stage) = stageBandPower;
-                        obj.spectralResults.relativePower.(sanitizedName).stages.(stage) = stageRelativePower;
-                    else
-                        fprintf('    Insufficient clean data for %s analysis\n', stage);
+                    % Only include if not mostly artifacts
+                    if sum(isnan(epochData)) / length(epochData) < 0.5
+                        stageData = [stageData, epochData];
                     end
                 end
             end
+            
+            if length(stageData) > 10 * fs % At least 10 seconds of data
+                [stagePSD, frequencies] = obj.calculateAdvancedPSD(stageData, fs);
+                [stageBandPower, stageTotalPower] = obj.calculateBandPower(stagePSD, frequencies, freqBands);
+                stageRelativePower = obj.calculateRelativePower(stageBandPower, stageTotalPower, freqBands);
+                
+                % Store both absolute and relative power in the CORRECT location
+                % This is the key fix: store in bandPower, not sleepStages
+                obj.spectralResults.bandPower.(sanitizedName).(stage) = stageBandPower;
+                obj.spectralResults.relativePower.(sanitizedName).stages.(stage) = stageRelativePower;
+                
+                fprintf('      Successfully analyzed %s: %.1f seconds of data\n', stage, length(stageData)/fs);
+            else
+                fprintf('    Insufficient clean data for %s analysis (only %.1f s)\n', stage, length(stageData)/fs);
+            end
+        else
+            fprintf('    %s: No epochs found\n', stage);
         end
+    end
+end
         
         function initializeStageMasks(obj, numEpochs)
             % Initialize masks for each sleep stage
