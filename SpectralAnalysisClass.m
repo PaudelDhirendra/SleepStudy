@@ -228,7 +228,7 @@ classdef SpectralAnalysisClass < handle
                 delete(outputFile);
             end
             
-            % 1. Sleep Period Analysis (SPT + TST + WASO)
+            % 1. Sleep Period Analysis (SPT + TST)
             obj.saveSleepPeriodAnalysisToExcel(outputFile);
             
             % 2. Stage-specific Analysis (including WASO but NOT general wake)
@@ -237,7 +237,10 @@ classdef SpectralAnalysisClass < handle
             % 3. Sleep Cycle Analysis
             obj.saveCycleAnalysisToExcel(outputFile);
             
-            % 4. Data Quality & Sleep Statistics
+                % 4. Regional Power Summary (NEW - ADD THIS LINE)
+    obj.saveRegionalPowerSummaryToExcel(outputFile);
+
+            % 5. Data Quality & Sleep Statistics
             obj.saveAdditionalSheets(outputFile);
             
             fprintf('SUCCESS: Excel file created with sleep-focused analysis: %s\n', outputFile);
@@ -254,9 +257,7 @@ classdef SpectralAnalysisClass < handle
             tstTable = obj.createTSTAnalysisTable();
             writetable(tstTable, outputFile, 'Sheet', 'TST_Analysis');
             
-            % WASO Analysis
-            wasoTable = obj.createWASOAnalysisTable();
-            writetable(wasoTable, outputFile, 'Sheet', 'WASO_Analysis');
+
         end
 
         function saveStageAnalysisToExcel(obj, outputFile)
@@ -577,6 +578,252 @@ classdef SpectralAnalysisClass < handle
                 end
             end
         end
+       
+        function powerValue = getRegionalPowerValue(obj, sanitizedName, period, bandName)
+    % Helper method to get power value for different periods and bands
+    
+    powerValue = NaN;
+    
+    try
+        if strcmp(period, 'TST')
+            % TST power
+            if isfield(obj.spectralResults.bandPower, sanitizedName) && ...
+               isfield(obj.spectralResults.bandPower.(sanitizedName), 'TST')
+                
+                if strcmp(bandName, 'total')
+                    % Total power
+                    if isfield(obj.spectralResults.bandPower.(sanitizedName).TST, 'totalPower')
+                        powerValue = obj.spectralResults.bandPower.(sanitizedName).TST.totalPower;
+                    end
+                else
+                    % Band power
+                    if isfield(obj.spectralResults.bandPower.(sanitizedName).TST, bandName)
+                        powerValue = obj.spectralResults.bandPower.(sanitizedName).TST.(bandName);
+                    end
+                end
+            end
+            
+        elseif strcmp(period, 'NREM')
+            % NREM average power (N2 + N3)
+            nremPower = 0;
+            nremBands = 0;
+            
+            % N2 power
+            if isfield(obj.spectralResults.bandPower, sanitizedName) && ...
+               isfield(obj.spectralResults.bandPower.(sanitizedName), 'N2')
+                
+                if strcmp(bandName, 'total')
+                    if isfield(obj.spectralResults.bandPower.(sanitizedName).N2, 'totalPower')
+                        n2Power = obj.spectralResults.bandPower.(sanitizedName).N2.totalPower;
+                        if n2Power > 0
+                            nremPower = nremPower + n2Power;
+                            nremBands = nremBands + 1;
+                        end
+                    end
+                else
+                    if isfield(obj.spectralResults.bandPower.(sanitizedName).N2, bandName)
+                        n2Power = obj.spectralResults.bandPower.(sanitizedName).N2.(bandName);
+                        if n2Power > 0
+                            nremPower = nremPower + n2Power;
+                            nremBands = nremBands + 1;
+                        end
+                    end
+                end
+            end
+            
+            % N3 power
+            if isfield(obj.spectralResults.bandPower, sanitizedName) && ...
+               isfield(obj.spectralResults.bandPower.(sanitizedName), 'N3')
+                
+                if strcmp(bandName, 'total')
+                    if isfield(obj.spectralResults.bandPower.(sanitizedName).N3, 'totalPower')
+                        n3Power = obj.spectralResults.bandPower.(sanitizedName).N3.totalPower;
+                        if n3Power > 0
+                            nremPower = nremPower + n3Power;
+                            nremBands = nremBands + 1;
+                        end
+                    end
+                else
+                    if isfield(obj.spectralResults.bandPower.(sanitizedName).N3, bandName)
+                        n3Power = obj.spectralResults.bandPower.(sanitizedName).N3.(bandName);
+                        if n3Power > 0
+                            nremPower = nremPower + n3Power;
+                            nremBands = nremBands + 1;
+                        end
+                    end
+                end
+            end
+            
+            if nremBands > 0
+                powerValue = nremPower / nremBands;
+            end
+            
+        elseif strcmp(period, 'REM')
+            % REM power
+            if isfield(obj.spectralResults.bandPower, sanitizedName) && ...
+               isfield(obj.spectralResults.bandPower.(sanitizedName), 'REM')
+                
+                if strcmp(bandName, 'total')
+                    if isfield(obj.spectralResults.bandPower.(sanitizedName).REM, 'totalPower')
+                        powerValue = obj.spectralResults.bandPower.(sanitizedName).REM.totalPower;
+                    end
+                else
+                    if isfield(obj.spectralResults.bandPower.(sanitizedName).REM, bandName)
+                        powerValue = obj.spectralResults.bandPower.(sanitizedName).REM.(bandName);
+                    end
+                end
+            end
+        end
+    catch
+        powerValue = NaN;
+    end
+end
+        
+        function regionalPowerTable = createRegionalPowerDBTable(obj)
+    % Create regional summary table with total power AND band power in dB for TST, NREM, REM
+    
+    channels = obj.spectralResults.channels;
+    
+    % Define channel groups by region
+    frontalChannels = {};
+    centralChannels = {};
+    occipitalChannels = {};
+    
+    for i = 1:length(channels)
+        chName = channels{i};
+        if contains(chName, 'F3') || contains(chName, 'F4') || contains(chName, 'Fz') || contains(chName, 'Fp')
+            frontalChannels{end+1} = chName;
+        elseif contains(chName, 'C3') || contains(chName, 'C4') || contains(chName, 'Cz')
+            centralChannels{end+1} = chName;
+        elseif contains(chName, 'O1') || contains(chName, 'O2') || contains(chName, 'Oz')
+            occipitalChannels{end+1} = chName;
+        end
+    end
+    
+    % Define regions
+    regions = {
+        'Global', channels;
+        'Frontal', frontalChannels;
+        'Central', centralChannels; 
+        'Occipital', occipitalChannels
+        };
+    
+    % Define sleep periods and frequency bands
+    sleepPeriods = {'TST', 'NREM', 'REM'};
+    freqBands = {
+        'Delta',    [1.0, 4.0];
+        'Theta',    [4.0, 8.0];
+        'Alpha',    [8.0, 12.0];
+        'Sigma',    [12.0, 15.0];
+        'Beta',     [15.0, 30.0];
+        'Gamma',    [30.0, 45.0]
+        };
+    
+    % Initialize table
+    regionalPowerTable = table();
+    regionalPowerTable.Region = regions(:,1);
+    regionalPowerTable.Channel_Count = cellfun(@length, regions(:,2));
+    
+    % Calculate TOTAL POWER for each region and sleep period
+    for p = 1:length(sleepPeriods)
+        period = sleepPeriods{p};
+        totalPowerData = zeros(size(regions, 1), 1);
+        
+        for r = 1:size(regions, 1)
+            region = regions{r, 1};
+            regionChannels = regions{r, 2};
+            
+            if isempty(regionChannels)
+                totalPowerData(r) = NaN;
+                continue;
+            end
+            
+            regionPowerSum = 0;
+            validChannels = 0;
+            
+            for ch = 1:length(regionChannels)
+                channelName = regionChannels{ch};
+                sanitizedName = obj.sanitizeFieldName(channelName);
+                
+                powerValue = obj.getRegionalPowerValue(sanitizedName, period, 'total');
+                if ~isnan(powerValue) && powerValue > 0
+                    regionPowerSum = regionPowerSum + powerValue;
+                    validChannels = validChannels + 1;
+                end
+            end
+            
+            % Calculate average power for the region and convert to dB
+            if validChannels > 0
+                avgRegionPower = regionPowerSum / validChannels;
+                % Convert to dB with proper reference (1 μV²)
+                totalPowerData(r) = 10 * log10(avgRegionPower);
+            else
+                totalPowerData(r) = NaN;
+            end
+        end
+        
+        % Add total power to table
+        regionalPowerTable.([period '_TotalPower_dB']) = totalPowerData;
+    end
+    
+    % Calculate BAND POWER for each region, sleep period, and frequency band
+    for p = 1:length(sleepPeriods)
+        period = sleepPeriods{p};
+        
+        for b = 1:size(freqBands, 1)
+            bandName = freqBands{b, 1};
+            bandPowerData = zeros(size(regions, 1), 1);
+            
+            for r = 1:size(regions, 1)
+                region = regions{r, 1};
+                regionChannels = regions{r, 2};
+                
+                if isempty(regionChannels)
+                    bandPowerData(r) = NaN;
+                    continue;
+                end
+                
+                regionBandPowerSum = 0;
+                validChannels = 0;
+                
+                for ch = 1:length(regionChannels)
+                    channelName = regionChannels{ch};
+                    sanitizedName = obj.sanitizeFieldName(channelName);
+                    
+                    powerValue = obj.getRegionalPowerValue(sanitizedName, period, bandName);
+                    if ~isnan(powerValue) && powerValue > 0
+                        regionBandPowerSum = regionBandPowerSum + powerValue;
+                        validChannels = validChannels + 1;
+                    end
+                end
+                
+                % Calculate average band power for the region and convert to dB
+                if validChannels > 0
+                    avgRegionBandPower = regionBandPowerSum / validChannels;
+                    % Convert to dB with proper reference (1 μV²)
+                    bandPowerData(r) = 10 * log10(avgRegionBandPower);
+                else
+                    bandPowerData(r) = NaN;
+                end
+            end
+            
+            % Add band power to table
+            regionalPowerTable.([period '_' bandName '_dB']) = bandPowerData;
+        end
+    end
+    
+    % Add channel lists for reference
+    regionalPowerTable.Channels = cell(size(regions, 1), 1);
+    for r = 1:size(regions, 1)
+        regionalPowerTable.Channels{r} = strjoin(regions{r, 2}, ', ');
+    end
+end
+        function saveRegionalPowerSummaryToExcel(obj, outputFile)
+    fprintf('  Saving regional power summary...\n');
+    
+    regionalTable = obj.createRegionalPowerDBTable();
+    writetable(regionalTable, outputFile, 'Sheet', 'Regional_Power_Summary');
+end
     end
     
     methods (Access = private)
@@ -1243,34 +1490,64 @@ end
         if stageEpochs > 0
             fprintf('    %s: %d epochs\n', stage, stageEpochs);
             
-            % Extract data for this stage
-            stageData = [];
+            % Extract data for this stage - FIXED: Use cell array to avoid dimension issues
+            stageDataCells = {};
+            validEpochCount = 0;
+            
             for epoch = 1:numCompleteEpochs
                 if stageMask(epoch)
                     startSample = (epoch-1) * samplesPerEpoch + 1;
                     endSample = min(epoch * samplesPerEpoch, length(channelData));
                     epochData = channelData(startSample:endSample);
                     
-                    % Only include if not mostly artifacts
-                    if sum(isnan(epochData)) / length(epochData) < 0.5
-                        stageData = [stageData, epochData];
+                    % Ensure column vector
+                    if size(epochData, 1) == 1
+                        epochData = epochData';
+                    end
+                    
+                    % Only include if not mostly artifacts and has valid data
+                    nanRatio = sum(isnan(epochData)) / length(epochData);
+                    if nanRatio < 0.5 && ~all(epochData == 0) && ~isempty(epochData)
+                        stageDataCells{end+1} = epochData;
+                        validEpochCount = validEpochCount + 1;
                     end
                 end
             end
             
-            if length(stageData) > 10 * fs % At least 10 seconds of data
-                [stagePSD, frequencies] = obj.calculateAdvancedPSD(stageData, fs);
-                [stageBandPower, stageTotalPower] = obj.calculateBandPower(stagePSD, frequencies, freqBands);
-                stageRelativePower = obj.calculateRelativePower(stageBandPower, stageTotalPower, freqBands);
-                
-                % Store both absolute and relative power in the CORRECT location
-                % This is the key fix: store in bandPower, not sleepStages
-                obj.spectralResults.bandPower.(sanitizedName).(stage) = stageBandPower;
-                obj.spectralResults.relativePower.(sanitizedName).stages.(stage) = stageRelativePower;
-                
-                fprintf('      Successfully analyzed %s: %.1f seconds of data\n', stage, length(stageData)/fs);
+            % Combine all epoch data into one vector - FIXED CONCATENATION
+            if ~isempty(stageDataCells)
+                stageData = vertcat(stageDataCells{:});
             else
-                fprintf('    Insufficient clean data for %s analysis (only %.1f s)\n', stage, length(stageData)/fs);
+                stageData = [];
+            end
+            
+            fprintf('    %s: %d valid epochs, %.1f seconds of clean data\n', ...
+                stage, validEpochCount, length(stageData)/fs);
+            
+            if length(stageData) > 10 * fs % At least 10 seconds of data
+                try
+                    [stagePSD, frequencies] = obj.calculateAdvancedPSD(stageData, fs);
+                    [stageBandPower, stageTotalPower] = obj.calculateBandPower(stagePSD, frequencies, freqBands);
+                    stageRelativePower = obj.calculateRelativePower(stageBandPower, stageTotalPower, freqBands);
+                    
+                    % DEBUG: Check if we have valid power values
+                    if isfield(stageBandPower, 'Delta') && stageBandPower.Delta > 0
+                        fprintf('      Successfully analyzed %s: %.1f seconds, Delta=%.6f μV²\n', ...
+                            stage, length(stageData)/fs, stageBandPower.Delta);
+                        
+                        % Store both absolute and relative power
+                        obj.spectralResults.bandPower.(sanitizedName).(stage) = stageBandPower;
+                        obj.spectralResults.relativePower.(sanitizedName).stages.(stage) = stageRelativePower;
+                    else
+                        fprintf('      WARNING: Invalid power values for %s - skipping storage\n', stage);
+                    end
+                    
+                catch ME
+                    fprintf('      ERROR in PSD analysis for %s: %s\n', stage, ME.message);
+                end
+            else
+                fprintf('    Insufficient clean data for %s analysis (only %.1f s < 10 s)\n', ...
+                    stage, length(stageData)/fs);
             end
         else
             fprintf('    %s: No epochs found\n', stage);
