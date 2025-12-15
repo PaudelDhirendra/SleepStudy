@@ -136,7 +136,7 @@ classdef SpectralAnalysisClass < handle
             
             % Define frequency bands
             freqBands = {
-                'Delta',    [1.0, 4.0];
+                'Delta',    [0.5, 4.0];
                 'Theta',    [4.0, 8.0];
                 'Alpha',    [8.0, 12.0];
                 'Sigma',    [12.0, 15.0];
@@ -711,7 +711,7 @@ end
     % Define sleep periods and frequency bands
     sleepPeriods = {'TST', 'NREM', 'REM'};
     freqBands = {
-        'Delta',    [1.0, 4.0];
+        'Delta',    [0.5, 4.0];
         'Theta',    [4.0, 8.0];
         'Alpha',    [8.0, 12.0];
         'Sigma',    [12.0, 15.0];
