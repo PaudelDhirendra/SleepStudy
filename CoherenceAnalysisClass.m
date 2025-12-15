@@ -347,7 +347,7 @@ function printSummaryStatistics(obj)
                 coherenceData.peakCoherence, coherenceData.peakFrequency);
             
             fprintf('Band Coherence:\n');
-            fprintf('  Delta (1-4 Hz): %.3f\n', coherenceData.bandCoherence.Delta);
+            fprintf('  Delta (0.5-4 Hz): %.3f\n', coherenceData.bandCoherence.Delta);
             fprintf('  Theta (4-8 Hz): %.3f\n', coherenceData.bandCoherence.Theta);
             fprintf('  Alpha (8-12 Hz): %.3f\n', coherenceData.bandCoherence.Alpha);
             fprintf('  Sigma (12-15 Hz): %.3f\n', coherenceData.bandCoherence.Sigma);
@@ -403,6 +403,12 @@ end
             allStages = union(allStages, stages);
         end
     end
+
+    % ADD THIS: Explicitly add NREM if not already found
+    if ~ismember('NREM', allStages)
+        allStages = union(allStages, {'NREM'});
+    end
+    
     allStages = union({'Global'}, allStages);
     
     % Initialize results table
@@ -642,7 +648,7 @@ end
             params.minDataLength = 30;
             
             params.frequencyBands = {
-                'Delta',    [1.0, 4.0];
+                'Delta',    [0.5, 4.0];
                 'Theta',    [4.0, 8.0];
                 'Alpha',    [8.0, 12.0];
                 'Sigma',    [12.0, 15.0];
@@ -974,74 +980,134 @@ end
         end
         
         function calculateStageSpecificCoherence(obj, idx1, idx2, pairName)
-            if isempty(obj.numericHypnogram) || isempty(obj.stageMasks)
-                fprintf('  No hypnogram available for stage-specific coherence\n');
-                return;
+    if isempty(obj.numericHypnogram) || isempty(obj.stageMasks)
+        fprintf('  No hypnogram available for stage-specific coherence\n');
+        return;
+    end
+    
+    data1 = obj.data{idx1};
+    data2 = obj.data{idx2};
+    fs = obj.fs(1);
+    
+    samplesPerEpoch = 30 * fs;
+    numCompleteEpochs = min(floor(length(data1) / samplesPerEpoch), length(obj.numericHypnogram));
+    
+    % ADD NREM TO THE LIST
+    stages = {'N1', 'N2', 'N3', 'REM', 'WASO', 'NREM'};
+    sanitizedPair = obj.sanitizeFieldName(pairName);
+    obj.coherenceResults.sleepStages.(sanitizedPair) = struct();
+    
+    fprintf('  Stage-specific coherence analysis (%d epochs):\n', numCompleteEpochs);
+    
+    for s = 1:length(stages)
+        stage = stages{s};
+        
+        if strcmp(stage, 'WASO')
+            % === EXISTING WASO CODE ===
+            stageMask = obj.createWASOMask(length(data1));
+            stageEpochs = sum(stageMask) / samplesPerEpoch;
+            
+        elseif strcmp(stage, 'NREM')
+            % === NEW NREM CODE ===
+            fprintf('    Calculating NREM (N2+N3 combined):\n');
+            
+            % Get masks for N2 and N3
+            n2Mask = obj.stageMasks.N2;
+            n3Mask = obj.stageMasks.N3;
+            
+            % Combine N2 and N3 epochs
+            nremMask = n2Mask | n3Mask;
+            stageEpochs = sum(nremMask(1:numCompleteEpochs));
+            
+        else
+            % === EXISTING CODE FOR N1, N2, N3, REM ===
+            stageMask = obj.stageMasks.(stage);
+            stageEpochs = sum(stageMask(1:numCompleteEpochs));
+        end
+        
+        if stageEpochs > 0
+            fprintf('    %s: %.1f epochs', stage, stageEpochs);
+            
+            % For NREM, add N2/N3 breakdown
+            if strcmp(stage, 'NREM')
+                fprintf(' (N2: %.0f, N3: %.0f)', ...
+                    sum(n2Mask(1:numCompleteEpochs)), ...
+                    sum(n3Mask(1:numCompleteEpochs)));
             end
+            fprintf('\n');
             
-            data1 = obj.data{idx1};
-            data2 = obj.data{idx2};
-            fs = obj.fs(1);
+            stageData1 = [];
+            stageData2 = [];
             
-            samplesPerEpoch = 30 * fs;
-            numCompleteEpochs = min(floor(length(data1) / samplesPerEpoch), length(obj.numericHypnogram));
-            
-            stages = {'N1', 'N2', 'N3', 'REM', 'WASO'};
-            sanitizedPair = obj.sanitizeFieldName(pairName);
-            obj.coherenceResults.sleepStages.(sanitizedPair) = struct();
-            
-            fprintf('  Stage-specific coherence analysis (%d epochs):\n', numCompleteEpochs);
-            
-            for s = 1:length(stages)
-                stage = stages{s};
+            if strcmp(stage, 'WASO')
+                % === EXISTING WASO DATA EXTRACTION ===
+                stageData1 = data1(stageMask);
+                stageData2 = data2(stageMask);
                 
-                if strcmp(stage, 'WASO')
-                    stageMask = obj.createWASOMask(length(data1));
-                    stageEpochs = sum(stageMask) / samplesPerEpoch;
-                else
-                    stageMask = obj.stageMasks.(stage);
-                    stageEpochs = sum(stageMask(1:numCompleteEpochs));
-                end
-                
-                if stageEpochs > 0
-                    fprintf('    %s: %.1f epochs\n', stage, stageEpochs);
-                    
-                    stageData1 = [];
-                    stageData2 = [];
-                    
-                    if strcmp(stage, 'WASO')
-                        stageData1 = data1(stageMask);
-                        stageData2 = data2(stageMask);
-                    else
-                        for epoch = 1:numCompleteEpochs
-                            if stageMask(epoch)
-                                startSample = (epoch-1) * samplesPerEpoch + 1;
-                                endSample = min(epoch * samplesPerEpoch, length(data1));
-                                
-                                epochData1 = data1(startSample:endSample);
-                                epochData2 = data2(startSample:endSample);
-                                
-                                if sum(isnan(epochData1)) / length(epochData1) < 0.5 && ...
-                                   sum(isnan(epochData2)) / length(epochData2) < 0.5
-                                    stageData1 = [stageData1; epochData1];
-                                    stageData2 = [stageData2; epochData2];
-                                end
-                            end
+            elseif strcmp(stage, 'NREM')
+                % === NEW NREM DATA EXTRACTION ===
+                for epoch = 1:numCompleteEpochs
+                    if nremMask(epoch)
+                        startSample = (epoch-1) * samplesPerEpoch + 1;
+                        endSample = min(epoch * samplesPerEpoch, length(data1));
+                        
+                        epochData1 = data1(startSample:endSample);
+                        epochData2 = data2(startSample:endSample);
+                        
+                        if sum(isnan(epochData1)) / length(epochData1) < 0.5 && ...
+                           sum(isnan(epochData2)) / length(epochData2) < 0.5
+                            stageData1 = [stageData1; epochData1];
+                            stageData2 = [stageData2; epochData2];
                         end
                     end
-                    
-                    if length(stageData1) > 30 * fs
-                        stageCoherence = obj.calculateCoherenceForData(stageData1, stageData2, fs);
-                        stageCoherence.stageEpochs = stageEpochs;
-                        obj.coherenceResults.sleepStages.(sanitizedPair).(stage) = stageCoherence;
-                        fprintf('      Coherence: mean=%.3f, peak=%.3f@%.1fHz\n', ...
-                            stageCoherence.meanCoherence, stageCoherence.peakCoherence, stageCoherence.peakFrequency);
-                    else
-                        fprintf('      Insufficient clean data (%.1f s < 30 s)\n', length(stageData1)/fs);
+                end
+                
+            else
+                % === EXISTING DATA EXTRACTION FOR N1, N2, N3, REM ===
+                for epoch = 1:numCompleteEpochs
+                    if stageMask(epoch)
+                        startSample = (epoch-1) * samplesPerEpoch + 1;
+                        endSample = min(epoch * samplesPerEpoch, length(data1));
+                        
+                        epochData1 = data1(startSample:endSample);
+                        epochData2 = data2(startSample:endSample);
+                        
+                        if sum(isnan(epochData1)) / length(epochData1) < 0.5 && ...
+                           sum(isnan(epochData2)) / length(epochData2) < 0.5
+                            stageData1 = [stageData1; epochData1];
+                            stageData2 = [stageData2; epochData2];
+                        end
                     end
                 end
             end
+            
+            if length(stageData1) > 30 * fs
+                stageCoherence = obj.calculateCoherenceForData(stageData1, stageData2, fs);
+                stageCoherence.stageEpochs = stageEpochs;
+                
+                % Add N2/N3 info for NREM
+                if strcmp(stage, 'NREM')
+                    stageCoherence.N2_epochs = sum(n2Mask(1:numCompleteEpochs));
+                    stageCoherence.N3_epochs = sum(n3Mask(1:numCompleteEpochs));
+                end
+                
+                obj.coherenceResults.sleepStages.(sanitizedPair).(stage) = stageCoherence;
+                
+                fprintf('      Coherence: mean=%.3f', stageCoherence.meanCoherence);
+                
+                % Only show peak frequency for non-NREM stages (optional)
+                if ~strcmp(stage, 'NREM')
+                    fprintf(', peak=%.3f@%.1fHz', ...
+                        stageCoherence.peakCoherence, stageCoherence.peakFrequency);
+                end
+                fprintf('\n');
+                
+            else
+                fprintf('      Insufficient clean data (%.1f s < 30 s)\n', length(stageData1)/fs);
+            end
         end
+    end
+end
 
 
         function calculateSleepCycleCoherence(obj, idx1, idx2, pairName)
