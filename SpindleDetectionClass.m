@@ -1879,10 +1879,65 @@ end
             fprintf('Calculating fusion detection metrics...\n');
             
             metrics = struct();
-            metrics.total_spindles = size(obj.spindleEvents, 1);
-            metrics.fast_spindles = size(obj.fastSpindleEvents, 1);
-            metrics.slow_spindles = size(obj.slowSpindleEvents, 1);
-            metrics.total_SO = size(obj.SO_events, 1);
+metrics = struct();
+
+% 1. Get all EEG channels that were analyzed
+spindle_channels = unique(obj.spindleEvents(:,7));
+if isempty(spindle_channels)
+    % No spindles detected
+    metrics.total_spindles = 0;
+    metrics.fast_spindles = 0;
+    metrics.slow_spindles = 0;
+    metrics.total_SO = size(obj.SO_events, 1);
+else
+    % 2. Calculate per-channel spindle counts (N2+N3 only)
+    per_channel_counts = zeros(length(spindle_channels), 1);
+    per_channel_fast = zeros(length(spindle_channels), 1);
+    per_channel_slow = zeros(length(spindle_channels), 1);
+    
+    for ch_idx = 1:length(spindle_channels)
+        channel_idx = spindle_channels(ch_idx);
+        
+        % Get all spindles for this channel
+        channel_spindles = obj.spindleEvents(obj.spindleEvents(:,7) == channel_idx, :);
+        
+        % Count only spindles in N2 or N3 sleep
+        nrem_count = 0;
+        fast_count = 0;
+        slow_count = 0;
+        
+        for i = 1:size(channel_spindles, 1)
+            spindle = channel_spindles(i, :);
+            epochNumber = ceil(spindle(3) / 30);
+            
+            % Check if spindle is in N2 or N3
+            if epochNumber <= length(obj.numericHypnogram)
+                stage = obj.numericHypnogram(epochNumber);
+                if stage == 2 || stage == 3  % N2 or N3 only
+                    nrem_count = nrem_count + 1;
+                    
+                    % Check fast vs slow
+                    freq = spindle(6);
+                    if freq >= 13 && freq <= 16
+                        fast_count = fast_count + 1;
+                    elseif freq >= 11 && freq < 13
+                        slow_count = slow_count + 1;
+                    end
+                end
+            end
+        end
+        
+        per_channel_counts(ch_idx) = nrem_count;
+        per_channel_fast(ch_idx) = fast_count;
+        per_channel_slow(ch_idx) = slow_count;
+    end
+    
+    % 3. Use AVERAGE (not sum) across channels
+    metrics.total_spindles = mean(per_channel_counts);
+    metrics.fast_spindles = mean(per_channel_fast);
+    metrics.slow_spindles = mean(per_channel_slow);
+    metrics.total_SO = size(obj.SO_events, 1);
+end
             
             % Density calculations
             totalNREMTime = obj.calculateNREMTime();
@@ -1899,13 +1954,34 @@ end
             end
             
             % Frequency characteristics
-            if metrics.total_spindles > 0
-                metrics.mean_frequency = mean(obj.spindleEvents(:,6));
-                metrics.std_frequency = std(obj.spindleEvents(:,6));
-                metrics.mean_duration = mean(obj.spindleEvents(:,5));
-                metrics.std_duration = std(obj.spindleEvents(:,5));
-                metrics.mean_amplitude = mean(obj.spindleEvents(:,4));
-                metrics.std_amplitude = std(obj.spindleEvents(:,4));
+if metrics.total_spindles > 0
+    % Collect only N2+N3 spindles for mean calculations
+    nrem_spindle_data = [];
+    for i = 1:size(obj.spindleEvents, 1)
+        epochNumber = ceil(obj.spindleEvents(i,3) / 30);
+        if epochNumber <= length(obj.numericHypnogram)
+            stage = obj.numericHypnogram(epochNumber);
+            if stage == 2 || stage == 3  % N2 or N3 only
+                nrem_spindle_data = [nrem_spindle_data; obj.spindleEvents(i, :)];
+            end
+        end
+    end
+    
+    if ~isempty(nrem_spindle_data)
+        metrics.mean_frequency = mean(nrem_spindle_data(:,6));
+        metrics.std_frequency = std(nrem_spindle_data(:,6));
+        metrics.mean_duration = mean(nrem_spindle_data(:,5));
+        metrics.std_duration = std(nrem_spindle_data(:,5));
+        metrics.mean_amplitude = mean(nrem_spindle_data(:,4));
+        metrics.std_amplitude = std(nrem_spindle_data(:,4));
+    else
+        metrics.mean_frequency = 0;
+        metrics.std_frequency = 0;
+        metrics.mean_duration = 0;
+        metrics.std_duration = 0;
+        metrics.mean_amplitude = 0;
+        metrics.std_amplitude = 0;
+    end
             else
                 metrics.mean_frequency = 0;
                 metrics.std_frequency = 0;
