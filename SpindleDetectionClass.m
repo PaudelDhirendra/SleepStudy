@@ -159,7 +159,7 @@ classdef SpindleDetectionClass < handle
 
             try
                 % Step 1: Detect Slow Oscillations in NREM sleep
-                fprintf('Detecting slow oscillations in NREM sleep (SPT only)...\n');
+                fprintf('Detecting slow oscillations in NREM sleep (N2 & N3 only)...\n');
                 obj.SO_events = obj.detectSlowOscillationsSPT();
 
                 % Step 2: Run both detection methods independently
