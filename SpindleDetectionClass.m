@@ -2593,7 +2593,7 @@ end
         end
         
         function channelStatsTable = buildChannelStatsTable(obj)
-    fprintf('Building channel statistics table without OVERALL rows...\n');
+    fprintf('Building channel statistics table with regional averages...\n');
 
     if isempty(obj.channelStats)
         channelStatsTable = table();
@@ -2604,16 +2604,31 @@ end
     fieldNames = fieldnames(stats)';
     stages = {'N1', 'N2', 'N3', 'REM', 'NREM'};
     
+    % Define which channels belong to which regions
+    frontal_channels = {'F3-M2', 'F4-M1', 'Fz'};
+    central_channels = {'C3-M2', 'C4-M1', 'Cz'};
+    
     data = {};
+    
+    % Track all channels and their regions for later averaging
+    all_channels = struct();
+    frontal_channel_data = {};
+    central_channel_data = {};
+    
+    % First, collect individual channel data
     for i = 1:length(fieldNames)
         fieldName = fieldNames{i};
         if isfield(stats, fieldName) && startsWith(fieldName, 'channel_')
             channelData = stats.(fieldName);
             
-            % REMOVE THE "OVERALL" ROW - Start directly with stage-specific rows
-            % Don't create an "OVERALL" row, just create stage-specific rows
+            % Store channel data by region for averaging later
+            if strcmp(channelData.region_name, 'Frontal')
+                frontal_channel_data{end+1} = channelData;
+            elseif strcmp(channelData.region_name, 'Central')
+                central_channel_data{end+1} = channelData;
+            end
             
-            % 1. STAGE-SPECIFIC ROWS ONLY (no OVERALL)
+            % 1. INDIVIDUAL CHANNEL ROWS
             for stage_idx = 1:length(stages)
                 stage = stages{stage_idx};
                 
@@ -2621,25 +2636,17 @@ end
                 data{end, 2} = channelData.channel_name;
                 data{end, 3} = stage;
                 
+                % Fill in the data using the same logic as before
                 if strcmp(stage, 'NREM')
                     % Handle NREM (average of N2+N3)
-                    total_field = 'NREM_count_display';
-                    fast_field = 'NREM_fast_display';
-                    slow_field = 'NREM_slow_display';
-                    SO_field = 'SO_NREM';
-                    
-                    data{end, 4} = obj.getFieldSafe(channelData, total_field, 0);
-                    data{end, 5} = obj.getFieldSafe(channelData, fast_field, 0);
-                    data{end, 6} = obj.getFieldSafe(channelData, slow_field, 0);
-                    data{end, 7} = obj.getFieldSafe(channelData, SO_field, 0);
-                    
-                    % Means for NREM
+                    data{end, 4} = obj.getFieldSafe(channelData, 'NREM_count_display', 0);
+                    data{end, 5} = obj.getFieldSafe(channelData, 'NREM_fast_display', 0);
+                    data{end, 6} = obj.getFieldSafe(channelData, 'NREM_slow_display', 0);
+                    data{end, 7} = obj.getFieldSafe(channelData, 'SO_NREM', 0);
                     data{end, 8} = obj.getFieldSafe(channelData, 'NREM_mean_frequency', 0);
                     data{end, 9} = obj.getFieldSafe(channelData, 'NREM_mean_duration', 0);
                     data{end, 10} = obj.getFieldSafe(channelData, 'NREM_mean_amplitude', 0);
-                    
-                    % Fast/slow mean frequencies (NREM doesn't have separate)
-                    data{end, 11} = 0;
+                    data{end, 11} = 0;  % NREM doesn't have separate fast/slow means
                     data{end, 12} = 0;
                     
                     % Densities for NREM
@@ -2697,6 +2704,132 @@ end
             end
         end
     end
+    
+    % 2. ADD FRONTAL REGIONAL AVERAGE (for N2 and NREM only)
+    if ~isempty(frontal_channel_data)
+        % Calculate Frontal average for N2
+        frontal_N2_data = obj.calculateRegionalAverage(frontal_channel_data, 'N2');
+        data{end+1, 1} = 'Frontal';
+        data{end, 2} = 'Frontal Average';
+        data{end, 3} = 'N2';
+        data{end, 4} = frontal_N2_data.spindle_count;
+        data{end, 5} = frontal_N2_data.fast_count;
+        data{end, 6} = frontal_N2_data.slow_count;
+        data{end, 7} = frontal_N2_data.SO_count;
+        data{end, 8} = frontal_N2_data.mean_frequency;
+        data{end, 9} = frontal_N2_data.mean_duration;
+        data{end, 10} = frontal_N2_data.mean_amplitude;
+        data{end, 11} = frontal_N2_data.fast_mean_freq;
+        data{end, 12} = frontal_N2_data.slow_mean_freq;
+        data{end, 13} = frontal_N2_data.spindle_density;
+        data{end, 14} = frontal_N2_data.fast_density;
+        data{end, 15} = frontal_N2_data.slow_density;
+        data{end, 16} = frontal_N2_data.SO_density;
+        
+        % Calculate Frontal average for NREM
+        frontal_NREM_data = obj.calculateRegionalAverage(frontal_channel_data, 'NREM');
+        data{end+1, 1} = 'Frontal';
+        data{end, 2} = 'Frontal Average';
+        data{end, 3} = 'NREM';
+        data{end, 4} = frontal_NREM_data.spindle_count;
+        data{end, 5} = frontal_NREM_data.fast_count;
+        data{end, 6} = frontal_NREM_data.slow_count;
+        data{end, 7} = frontal_NREM_data.SO_count;
+        data{end, 8} = frontal_NREM_data.mean_frequency;
+        data{end, 9} = frontal_NREM_data.mean_duration;
+        data{end, 10} = frontal_NREM_data.mean_amplitude;
+        data{end, 11} = frontal_NREM_data.fast_mean_freq;
+        data{end, 12} = frontal_NREM_data.slow_mean_freq;
+        data{end, 13} = frontal_NREM_data.spindle_density;
+        data{end, 14} = frontal_NREM_data.fast_density;
+        data{end, 15} = frontal_NREM_data.slow_density;
+        data{end, 16} = frontal_NREM_data.SO_density;
+    end
+    
+    % 3. ADD CENTRAL REGIONAL AVERAGE (for N2 and NREM only)
+    if ~isempty(central_channel_data)
+        % Calculate Central average for N2
+        central_N2_data = obj.calculateRegionalAverage(central_channel_data, 'N2');
+        data{end+1, 1} = 'Central';
+        data{end, 2} = 'Central Average';
+        data{end, 3} = 'N2';
+        data{end, 4} = central_N2_data.spindle_count;
+        data{end, 5} = central_N2_data.fast_count;
+        data{end, 6} = central_N2_data.slow_count;
+        data{end, 7} = central_N2_data.SO_count;
+        data{end, 8} = central_N2_data.mean_frequency;
+        data{end, 9} = central_N2_data.mean_duration;
+        data{end, 10} = central_N2_data.mean_amplitude;
+        data{end, 11} = central_N2_data.fast_mean_freq;
+        data{end, 12} = central_N2_data.slow_mean_freq;
+        data{end, 13} = central_N2_data.spindle_density;
+        data{end, 14} = central_N2_data.fast_density;
+        data{end, 15} = central_N2_data.slow_density;
+        data{end, 16} = central_N2_data.SO_density;
+        
+        % Calculate Central average for NREM
+        central_NREM_data = obj.calculateRegionalAverage(central_channel_data, 'NREM');
+        data{end+1, 1} = 'Central';
+        data{end, 2} = 'Central Average';
+        data{end, 3} = 'NREM';
+        data{end, 4} = central_NREM_data.spindle_count;
+        data{end, 5} = central_NREM_data.fast_count;
+        data{end, 6} = central_NREM_data.slow_count;
+        data{end, 7} = central_NREM_data.SO_count;
+        data{end, 8} = central_NREM_data.mean_frequency;
+        data{end, 9} = central_NREM_data.mean_duration;
+        data{end, 10} = central_NREM_data.mean_amplitude;
+        data{end, 11} = central_NREM_data.fast_mean_freq;
+        data{end, 12} = central_NREM_data.slow_mean_freq;
+        data{end, 13} = central_NREM_data.spindle_density;
+        data{end, 14} = central_NREM_data.fast_density;
+        data{end, 15} = central_NREM_data.slow_density;
+        data{end, 16} = central_NREM_data.SO_density;
+    end
+    
+    % 4. ADD OVERALL AVERAGE (combining Frontal and Central for N2 and NREM)
+    if ~isempty(frontal_channel_data) && ~isempty(central_channel_data)
+        % Combine all regional averages for overall average
+        all_regional_data = [frontal_channel_data, central_channel_data];
+        
+        % Overall average for N2
+        overall_N2_data = obj.calculateRegionalAverage(all_regional_data, 'N2');
+        data{end+1, 1} = 'Overall';
+        data{end, 2} = 'Overall Average';
+        data{end, 3} = 'N2';
+        data{end, 4} = overall_N2_data.spindle_count;
+        data{end, 5} = overall_N2_data.fast_count;
+        data{end, 6} = overall_N2_data.slow_count;
+        data{end, 7} = overall_N2_data.SO_count;
+        data{end, 8} = overall_N2_data.mean_frequency;
+        data{end, 9} = overall_N2_data.mean_duration;
+        data{end, 10} = overall_N2_data.mean_amplitude;
+        data{end, 11} = overall_N2_data.fast_mean_freq;
+        data{end, 12} = overall_N2_data.slow_mean_freq;
+        data{end, 13} = overall_N2_data.spindle_density;
+        data{end, 14} = overall_N2_data.fast_density;
+        data{end, 15} = overall_N2_data.slow_density;
+        data{end, 16} = overall_N2_data.SO_density;
+        
+        % Overall average for NREM
+        overall_NREM_data = obj.calculateRegionalAverage(all_regional_data, 'NREM');
+        data{end+1, 1} = 'Overall';
+        data{end, 2} = 'Overall Average';
+        data{end, 3} = 'NREM';
+        data{end, 4} = overall_NREM_data.spindle_count;
+        data{end, 5} = overall_NREM_data.fast_count;
+        data{end, 6} = overall_NREM_data.slow_count;
+        data{end, 7} = overall_NREM_data.SO_count;
+        data{end, 8} = overall_NREM_data.mean_frequency;
+        data{end, 9} = overall_NREM_data.mean_duration;
+        data{end, 10} = overall_NREM_data.mean_amplitude;
+        data{end, 11} = overall_NREM_data.fast_mean_freq;
+        data{end, 12} = overall_NREM_data.slow_mean_freq;
+        data{end, 13} = overall_NREM_data.spindle_density;
+        data{end, 14} = overall_NREM_data.fast_density;
+        data{end, 15} = overall_NREM_data.slow_density;
+        data{end, 16} = overall_NREM_data.SO_density;
+    end
 
     if isempty(data)
         channelStatsTable = table();
@@ -2709,7 +2842,142 @@ end
             });
     end
     
-    fprintf('Channel statistics table: %d stage-specific rows (no OVERALL)\n', size(data, 1));
+    fprintf('Channel statistics table: %d rows (channels + regional averages)\n', size(data, 1));
+end
+
+% Add this helper method to calculate regional averages
+function regional_data = calculateRegionalAverage(obj, channel_data_array, stage)
+    % Calculate average across channels in a region for a specific stage
+    n_channels = length(channel_data_array);
+    
+    % Initialize accumulators
+    spindle_count_sum = 0;
+    fast_count_sum = 0;
+    slow_count_sum = 0;
+    SO_count_sum = 0;
+    freq_accum = 0;
+    dur_accum = 0;
+    amp_accum = 0;
+    fast_freq_accum = 0;
+    slow_freq_accum = 0;
+    fast_count_for_freq = 0;
+    slow_count_for_freq = 0;
+    spindle_count_for_mean = 0;
+    
+    for i = 1:n_channels
+        channel_data = channel_data_array{i};
+        
+        if strcmp(stage, 'NREM')
+            % For NREM stage
+            spindle_count = obj.getFieldSafe(channel_data, 'NREM_count_display', 0);
+            fast_count = obj.getFieldSafe(channel_data, 'NREM_fast_display', 0);
+            slow_count = obj.getFieldSafe(channel_data, 'NREM_slow_display', 0);
+            SO_count = obj.getFieldSafe(channel_data, 'SO_NREM', 0);
+            mean_freq = obj.getFieldSafe(channel_data, 'NREM_mean_frequency', 0);
+            mean_dur = obj.getFieldSafe(channel_data, 'NREM_mean_duration', 0);
+            mean_amp = obj.getFieldSafe(channel_data, 'NREM_mean_amplitude', 0);
+            
+            % For NREM, we don't have separate fast/slow frequencies
+            fast_mean_freq = 0;
+            slow_mean_freq = 0;
+            
+        else
+            % For regular stages (N2, N3, etc.)
+            total_field = ['total_' stage];
+            fast_field = ['fast_' stage];
+            slow_field = ['slow_' stage];
+            SO_field = ['SO_' stage];
+            mean_freq_field = [stage '_mean_frequency'];
+            mean_dur_field = [stage '_mean_duration'];
+            mean_amp_field = [stage '_mean_amplitude'];
+            fast_mean_freq_field = [stage '_fast_mean_freq'];
+            slow_mean_freq_field = [stage '_slow_mean_freq'];
+            
+            spindle_count = obj.getFieldSafe(channel_data, total_field, 0);
+            fast_count = obj.getFieldSafe(channel_data, fast_field, 0);
+            slow_count = obj.getFieldSafe(channel_data, slow_field, 0);
+            SO_count = obj.getFieldSafe(channel_data, SO_field, 0);
+            mean_freq = obj.getFieldSafe(channel_data, mean_freq_field, 0);
+            mean_dur = obj.getFieldSafe(channel_data, mean_dur_field, 0);
+            mean_amp = obj.getFieldSafe(channel_data, mean_amp_field, 0);
+            fast_mean_freq = obj.getFieldSafe(channel_data, fast_mean_freq_field, 0);
+            slow_mean_freq = obj.getFieldSafe(channel_data, slow_mean_freq_field, 0);
+        end
+        
+        % Accumulate counts
+        spindle_count_sum = spindle_count_sum + spindle_count;
+        fast_count_sum = fast_count_sum + fast_count;
+        slow_count_sum = slow_count_sum + slow_count;
+        SO_count_sum = SO_count_sum + SO_count;
+        
+        % Accumulate for weighted averages
+        if spindle_count > 0
+            freq_accum = freq_accum + (mean_freq * spindle_count);
+            dur_accum = dur_accum + (mean_dur * spindle_count);
+            amp_accum = amp_accum + (mean_amp * spindle_count);
+            spindle_count_for_mean = spindle_count_for_mean + spindle_count;
+        end
+        
+        if fast_count > 0
+            fast_freq_accum = fast_freq_accum + (fast_mean_freq * fast_count);
+            fast_count_for_freq = fast_count_for_freq + fast_count;
+        end
+        
+        if slow_count > 0
+            slow_freq_accum = slow_freq_accum + (slow_mean_freq * slow_count);
+            slow_count_for_freq = slow_count_for_freq + slow_count;
+        end
+    end
+    
+    % Calculate averages
+    regional_data = struct();
+    regional_data.spindle_count = spindle_count_sum / n_channels;
+    regional_data.fast_count = fast_count_sum / n_channels;
+    regional_data.slow_count = slow_count_sum / n_channels;
+    regional_data.SO_count = SO_count_sum / n_channels;
+    
+    % Calculate weighted means
+    if spindle_count_for_mean > 0
+        regional_data.mean_frequency = freq_accum / spindle_count_for_mean;
+        regional_data.mean_duration = dur_accum / spindle_count_for_mean;
+        regional_data.mean_amplitude = amp_accum / spindle_count_for_mean;
+    else
+        regional_data.mean_frequency = 0;
+        regional_data.mean_duration = 0;
+        regional_data.mean_amplitude = 0;
+    end
+    
+    if fast_count_for_freq > 0
+        regional_data.fast_mean_freq = fast_freq_accum / fast_count_for_freq;
+    else
+        regional_data.fast_mean_freq = 0;
+    end
+    
+    if slow_count_for_freq > 0
+        regional_data.slow_mean_freq = slow_freq_accum / slow_count_for_freq;
+    else
+        regional_data.slow_mean_freq = 0;
+    end
+    
+    % Calculate densities (using average stage duration)
+    stageDurations = obj.calculateStageDurations();
+    if strcmp(stage, 'NREM')
+        stage_duration = (stageDurations.N2 + stageDurations.N3) / 2;
+    else
+        stage_duration = stageDurations.(stage);
+    end
+    
+    if stage_duration > 0
+        regional_data.spindle_density = regional_data.spindle_count / stage_duration;
+        regional_data.fast_density = regional_data.fast_count / stage_duration;
+        regional_data.slow_density = regional_data.slow_count / stage_duration;
+        regional_data.SO_density = regional_data.SO_count / stage_duration;
+    else
+        regional_data.spindle_density = 0;
+        regional_data.fast_density = 0;
+        regional_data.slow_density = 0;
+        regional_data.SO_density = 0;
+    end
 end
 
         function stageStatsTable = buildStageStatsTable(obj)
