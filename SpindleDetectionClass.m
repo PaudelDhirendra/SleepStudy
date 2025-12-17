@@ -635,8 +635,8 @@ function performStageStatistics(obj)
 end
 
 function performCycleStatistics(obj)
-    % Cycle statistics with channel-stage breakdown ONLY - NO TOTALS
-    fprintf('Performing cycle statistics by channel and stage (no totals)...\n');
+    % Cycle statistics with channel-stage breakdown PLUS regional averages
+    fprintf('Performing cycle statistics by channel and stage with regional averages...\n');
     
     if isempty(obj.spindleEvents) || isempty(obj.sleepCycles) || isempty(obj.numericHypnogram)
         fprintf('Insufficient data for cycle statistics\n');
@@ -648,6 +648,10 @@ function performCycleStatistics(obj)
     spindle_channels = unique(obj.spindleEvents(:,7));
     stages = {'N1', 'N2', 'N3', 'REM'};
     
+    % Define regions
+    frontal_channels = {'F3-M2', 'F4-M1', 'Fz'};
+    central_channels = {'C3-M2', 'C4-M1', 'Cz'};
+    
     data = {};
     
     for cycleIdx = 1:length(uniqueCycles)
@@ -658,11 +662,26 @@ function performCycleStatistics(obj)
         % Calculate stage durations within this cycle
         cycleStageDurations = obj.calculateCycleStageDurations(cycleEpochs);
         
-        % Add channel-stage specific statistics for this cycle ONLY
+        % Track channel data for this cycle by region
+        frontal_N2_data = struct('spindles', [], 'fast', [], 'slow', [], 'freq', [], 'dur', [], 'amp', [], 'SO_count', []);
+        frontal_N3_data = struct('spindles', [], 'fast', [], 'slow', [], 'freq', [], 'dur', [], 'amp', [], 'SO_count', []);
+        central_N2_data = struct('spindles', [], 'fast', [], 'slow', [], 'freq', [], 'dur', [], 'amp', [], 'SO_count', []);
+        central_N3_data = struct('spindles', [], 'fast', [], 'slow', [], 'freq', [], 'dur', [], 'amp', [], 'SO_count', []);
+        
+        % Add channel-stage specific statistics for this cycle
         for chIdx = 1:length(spindle_channels)
             channelIdx = spindle_channels(chIdx);
             if channelIdx <= length(obj.channelLabels)
                 chName = obj.channelLabels{channelIdx};
+                
+                % Determine region
+                if ismember(chName, frontal_channels)
+                    region = 'Frontal';
+                elseif ismember(chName, central_channels)
+                    region = 'Central';
+                else
+                    region = 'Other';
+                end
                 
                 for stageIdx = 1:length(stages)
                     stage = stages{stageIdx};
@@ -672,37 +691,646 @@ function performCycleStatistics(obj)
                     [spindle_count, fast_count, slow_count, mean_freq, mean_dur, mean_amp] = ...
                         obj.countSpindlesInChannelCycleStage(channelIdx, cycleEpochs, stageNum);
                     
+                    % Count SOs for this channel-cycle-stage combination
+                    SO_count = obj.countSOsInChannelCycleStage(channelIdx, cycleEpochs, stageNum);
+                    
                     % Calculate statistics
                     stage_duration = cycleStageDurations.(stage);
                     spindle_density = 0;
                     fast_density = 0;
                     slow_density = 0;
+                    SO_density = 0;
                     
                     if stage_duration > 0
                         spindle_density = spindle_count / stage_duration;
                         fast_density = fast_count / stage_duration;
                         slow_density = slow_count / stage_duration;
+                        SO_density = SO_count / stage_duration;
                     end
                     
-                    % Add to data table (only if there are spindles)
-                    if spindle_count > 0
+                    % Add to data table (only if there are spindles OR SOs OR if it's N2/N3 for regional averages)
+                    if spindle_count > 0 || SO_count > 0 || strcmp(stage, 'N2') || strcmp(stage, 'N3')
                         data{end+1, 1} = cycleNum;
                         data{end, 2} = chName;
-                        data{end, 3} = stage;
-                        data{end, 4} = spindle_count;
-                        data{end, 5} = fast_count;
-                        data{end, 6} = slow_count;
-                        data{end, 7} = stage_duration;
-                        data{end, 8} = spindle_density;
-                        data{end, 9} = fast_density;
-                        data{end, 10} = slow_density;
-                        data{end, 11} = mean_freq;
-                        data{end, 12} = mean_dur;
-                        data{end, 13} = mean_amp;
-                        data{end, 14} = cycleDuration;
+                        data{end, 3} = region;
+                        data{end, 4} = stage;
+                        data{end, 5} = spindle_count;
+                        data{end, 6} = fast_count;
+                        data{end, 7} = slow_count;
+                        data{end, 8} = SO_count;
+                        data{end, 9} = stage_duration;
+                        data{end, 10} = spindle_density;
+                        data{end, 11} = fast_density;
+                        data{end, 12} = slow_density;
+                        data{end, 13} = SO_density;
+                        data{end, 14} = mean_freq;
+                        data{end, 15} = mean_dur;
+                        data{end, 16} = mean_amp;
+                        data{end, 17} = cycleDuration;
+                    end
+                    
+                    % Collect data for regional averages (store means weighted by spindle count)
+                    if strcmp(stage, 'N2')
+                        if strcmp(region, 'Frontal')
+                            frontal_N2_data.spindles(end+1) = spindle_count;
+                            frontal_N2_data.fast(end+1) = fast_count;
+                            frontal_N2_data.slow(end+1) = slow_count;
+                            frontal_N2_data.freq(end+1) = mean_freq * spindle_count; % Weighted by count
+                            frontal_N2_data.dur(end+1) = mean_dur * spindle_count;   % Weighted by count
+                            frontal_N2_data.amp(end+1) = mean_amp * spindle_count;   % Weighted by count
+                            frontal_N2_data.SO_count(end+1) = SO_count;
+                        elseif strcmp(region, 'Central')
+                            central_N2_data.spindles(end+1) = spindle_count;
+                            central_N2_data.fast(end+1) = fast_count;
+                            central_N2_data.slow(end+1) = slow_count;
+                            central_N2_data.freq(end+1) = mean_freq * spindle_count; % Weighted by count
+                            central_N2_data.dur(end+1) = mean_dur * spindle_count;   % Weighted by count
+                            central_N2_data.amp(end+1) = mean_amp * spindle_count;   % Weighted by count
+                            central_N2_data.SO_count(end+1) = SO_count;
+                        end
+                    elseif strcmp(stage, 'N3')
+                        if strcmp(region, 'Frontal')
+                            frontal_N3_data.spindles(end+1) = spindle_count;
+                            frontal_N3_data.fast(end+1) = fast_count;
+                            frontal_N3_data.slow(end+1) = slow_count;
+                            frontal_N3_data.freq(end+1) = mean_freq * spindle_count; % Weighted by count
+                            frontal_N3_data.dur(end+1) = mean_dur * spindle_count;   % Weighted by count
+                            frontal_N3_data.amp(end+1) = mean_amp * spindle_count;   % Weighted by count
+                            frontal_N3_data.SO_count(end+1) = SO_count;
+                        elseif strcmp(region, 'Central')
+                            central_N3_data.spindles(end+1) = spindle_count;
+                            central_N3_data.fast(end+1) = fast_count;
+                            central_N3_data.slow(end+1) = slow_count;
+                            central_N3_data.freq(end+1) = mean_freq * spindle_count; % Weighted by count
+                            central_N3_data.dur(end+1) = mean_dur * spindle_count;   % Weighted by count
+                            central_N3_data.amp(end+1) = mean_amp * spindle_count;   % Weighted by count
+                            central_N3_data.SO_count(end+1) = SO_count;
+                        end
                     end
                 end
             end
+        end
+        
+        % Add Frontal Average for N2
+        if ~isempty(frontal_N2_data.spindles)
+            avg_spindles = round(mean(frontal_N2_data.spindles));
+            avg_fast = round(mean(frontal_N2_data.fast));
+            avg_slow = round(mean(frontal_N2_data.slow));
+            avg_SO = round(mean(frontal_N2_data.SO_count));
+            
+            % Calculate weighted means for frequency, duration, amplitude
+            total_spindles = sum(frontal_N2_data.spindles);
+            if total_spindles > 0
+                avg_freq = sum(frontal_N2_data.freq) / total_spindles;
+                avg_dur = sum(frontal_N2_data.dur) / total_spindles;
+                avg_amp = sum(frontal_N2_data.amp) / total_spindles;
+            else
+                avg_freq = 0;
+                avg_dur = 0;
+                avg_amp = 0;
+            end
+            
+            stage_duration = cycleStageDurations.N2;
+            
+            if stage_duration > 0
+                spindle_density = avg_spindles / stage_duration;
+                fast_density = avg_fast / stage_duration;
+                slow_density = avg_slow / stage_duration;
+                SO_density = avg_SO / stage_duration;
+            else
+                spindle_density = 0;
+                fast_density = 0;
+                slow_density = 0;
+                SO_density = 0;
+            end
+            
+            data{end+1, 1} = cycleNum;
+            data{end, 2} = 'Frontal Average';
+            data{end, 3} = 'Frontal';
+            data{end, 4} = 'N2';
+            data{end, 5} = avg_spindles;
+            data{end, 6} = avg_fast;
+            data{end, 7} = avg_slow;
+            data{end, 8} = avg_SO;
+            data{end, 9} = stage_duration;
+            data{end, 10} = spindle_density;
+            data{end, 11} = fast_density;
+            data{end, 12} = slow_density;
+            data{end, 13} = SO_density;
+            data{end, 14} = avg_freq;
+            data{end, 15} = avg_dur;
+            data{end, 16} = avg_amp;
+            data{end, 17} = cycleDuration;
+        end
+        
+        % Add Central Average for N2
+        if ~isempty(central_N2_data.spindles)
+            avg_spindles = round(mean(central_N2_data.spindles));
+            avg_fast = round(mean(central_N2_data.fast));
+            avg_slow = round(mean(central_N2_data.slow));
+            avg_SO = round(mean(central_N2_data.SO_count));
+            
+            % Calculate weighted means for frequency, duration, amplitude
+            total_spindles = sum(central_N2_data.spindles);
+            if total_spindles > 0
+                avg_freq = sum(central_N2_data.freq) / total_spindles;
+                avg_dur = sum(central_N2_data.dur) / total_spindles;
+                avg_amp = sum(central_N2_data.amp) / total_spindles;
+            else
+                avg_freq = 0;
+                avg_dur = 0;
+                avg_amp = 0;
+            end
+            
+            stage_duration = cycleStageDurations.N2;
+            
+            if stage_duration > 0
+                spindle_density = avg_spindles / stage_duration;
+                fast_density = avg_fast / stage_duration;
+                slow_density = avg_slow / stage_duration;
+                SO_density = avg_SO / stage_duration;
+            else
+                spindle_density = 0;
+                fast_density = 0;
+                slow_density = 0;
+                SO_density = 0;
+            end
+            
+            data{end+1, 1} = cycleNum;
+            data{end, 2} = 'Central Average';
+            data{end, 3} = 'Central';
+            data{end, 4} = 'N2';
+            data{end, 5} = avg_spindles;
+            data{end, 6} = avg_fast;
+            data{end, 7} = avg_slow;
+            data{end, 8} = avg_SO;
+            data{end, 9} = stage_duration;
+            data{end, 10} = spindle_density;
+            data{end, 11} = fast_density;
+            data{end, 12} = slow_density;
+            data{end, 13} = SO_density;
+            data{end, 14} = avg_freq;
+            data{end, 15} = avg_dur;
+            data{end, 16} = avg_amp;
+            data{end, 17} = cycleDuration;
+        end
+        
+        % Add Frontal Average for NREM (average of N2+N3)
+        if ~isempty(frontal_N2_data.spindles) || ~isempty(frontal_N3_data.spindles)
+            % Handle N2 data
+            if ~isempty(frontal_N2_data.spindles)
+                N2_avg = mean(frontal_N2_data.spindles);
+                N2_fast_avg = mean(frontal_N2_data.fast);
+                N2_slow_avg = mean(frontal_N2_data.slow);
+                N2_SO_avg = mean(frontal_N2_data.SO_count);
+                N2_total_spindles = sum(frontal_N2_data.spindles);
+                if N2_total_spindles > 0
+                    N2_avg_freq = sum(frontal_N2_data.freq) / N2_total_spindles;
+                    N2_avg_dur = sum(frontal_N2_data.dur) / N2_total_spindles;
+                    N2_avg_amp = sum(frontal_N2_data.amp) / N2_total_spindles;
+                else
+                    N2_avg_freq = 0;
+                    N2_avg_dur = 0;
+                    N2_avg_amp = 0;
+                end
+            else
+                N2_avg = 0;
+                N2_fast_avg = 0;
+                N2_slow_avg = 0;
+                N2_SO_avg = 0;
+                N2_avg_freq = 0;
+                N2_avg_dur = 0;
+                N2_avg_amp = 0;
+            end
+            
+            % Handle N3 data
+            if ~isempty(frontal_N3_data.spindles)
+                N3_avg = mean(frontal_N3_data.spindles);
+                N3_fast_avg = mean(frontal_N3_data.fast);
+                N3_slow_avg = mean(frontal_N3_data.slow);
+                N3_SO_avg = mean(frontal_N3_data.SO_count);
+                N3_total_spindles = sum(frontal_N3_data.spindles);
+                if N3_total_spindles > 0
+                    N3_avg_freq = sum(frontal_N3_data.freq) / N3_total_spindles;
+                    N3_avg_dur = sum(frontal_N3_data.dur) / N3_total_spindles;
+                    N3_avg_amp = sum(frontal_N3_data.amp) / N3_total_spindles;
+                else
+                    N3_avg_freq = 0;
+                    N3_avg_dur = 0;
+                    N3_avg_amp = 0;
+                end
+            else
+                N3_avg = 0;
+                N3_fast_avg = 0;
+                N3_slow_avg = 0;
+                N3_SO_avg = 0;
+                N3_avg_freq = 0;
+                N3_avg_dur = 0;
+                N3_avg_amp = 0;
+            end
+            
+            nrem_spindles = round((N2_avg + N3_avg) / 2);
+            nrem_fast = round((N2_fast_avg + N3_fast_avg) / 2);
+            nrem_slow = round((N2_slow_avg + N3_slow_avg) / 2);
+            nrem_SO = round((N2_SO_avg + N3_SO_avg) / 2);
+            nrem_freq = (N2_avg_freq + N3_avg_freq) / 2;
+            nrem_dur = (N2_avg_dur + N3_avg_dur) / 2;
+            nrem_amp = (N2_avg_amp + N3_avg_amp) / 2;
+            
+            nrem_duration = (cycleStageDurations.N2 + cycleStageDurations.N3) / 2;
+            
+            if nrem_duration > 0
+                spindle_density = nrem_spindles / nrem_duration;
+                fast_density = nrem_fast / nrem_duration;
+                slow_density = nrem_slow / nrem_duration;
+                SO_density = nrem_SO / nrem_duration;
+            else
+                spindle_density = 0;
+                fast_density = 0;
+                slow_density = 0;
+                SO_density = 0;
+            end
+            
+            data{end+1, 1} = cycleNum;
+            data{end, 2} = 'Frontal Average';
+            data{end, 3} = 'Frontal';
+            data{end, 4} = 'NREM';
+            data{end, 5} = nrem_spindles;
+            data{end, 6} = nrem_fast;
+            data{end, 7} = nrem_slow;
+            data{end, 8} = nrem_SO;
+            data{end, 9} = nrem_duration;
+            data{end, 10} = spindle_density;
+            data{end, 11} = fast_density;
+            data{end, 12} = slow_density;
+            data{end, 13} = SO_density;
+            data{end, 14} = nrem_freq;
+            data{end, 15} = nrem_dur;
+            data{end, 16} = nrem_amp;
+            data{end, 17} = cycleDuration;
+        end
+        
+        % Add Central Average for NREM (average of N2+N3)
+        if ~isempty(central_N2_data.spindles) || ~isempty(central_N3_data.spindles)
+            % Handle N2 data
+            if ~isempty(central_N2_data.spindles)
+                N2_avg = mean(central_N2_data.spindles);
+                N2_fast_avg = mean(central_N2_data.fast);
+                N2_slow_avg = mean(central_N2_data.slow);
+                N2_SO_avg = mean(central_N2_data.SO_count);
+                N2_total_spindles = sum(central_N2_data.spindles);
+                if N2_total_spindles > 0
+                    N2_avg_freq = sum(central_N2_data.freq) / N2_total_spindles;
+                    N2_avg_dur = sum(central_N2_data.dur) / N2_total_spindles;
+                    N2_avg_amp = sum(central_N2_data.amp) / N2_total_spindles;
+                else
+                    N2_avg_freq = 0;
+                    N2_avg_dur = 0;
+                    N2_avg_amp = 0;
+                end
+            else
+                N2_avg = 0;
+                N2_fast_avg = 0;
+                N2_slow_avg = 0;
+                N2_SO_avg = 0;
+                N2_avg_freq = 0;
+                N2_avg_dur = 0;
+                N2_avg_amp = 0;
+            end
+            
+            % Handle N3 data
+            if ~isempty(central_N3_data.spindles)
+                N3_avg = mean(central_N3_data.spindles);
+                N3_fast_avg = mean(central_N3_data.fast);
+                N3_slow_avg = mean(central_N3_data.slow);
+                N3_SO_avg = mean(central_N3_data.SO_count);
+                N3_total_spindles = sum(central_N3_data.spindles);
+                if N3_total_spindles > 0
+                    N3_avg_freq = sum(central_N3_data.freq) / N3_total_spindles;
+                    N3_avg_dur = sum(central_N3_data.dur) / N3_total_spindles;
+                    N3_avg_amp = sum(central_N3_data.amp) / N3_total_spindles;
+                else
+                    N3_avg_freq = 0;
+                    N3_avg_dur = 0;
+                    N3_avg_amp = 0;
+                end
+            else
+                N3_avg = 0;
+                N3_fast_avg = 0;
+                N3_slow_avg = 0;
+                N3_SO_avg = 0;
+                N3_avg_freq = 0;
+                N3_avg_dur = 0;
+                N3_avg_amp = 0;
+            end
+            
+            nrem_spindles = round((N2_avg + N3_avg) / 2);
+            nrem_fast = round((N2_fast_avg + N3_fast_avg) / 2);
+            nrem_slow = round((N2_slow_avg + N3_slow_avg) / 2);
+            nrem_SO = round((N2_SO_avg + N3_SO_avg) / 2);
+            nrem_freq = (N2_avg_freq + N3_avg_freq) / 2;
+            nrem_dur = (N2_avg_dur + N3_avg_dur) / 2;
+            nrem_amp = (N2_avg_amp + N3_avg_amp) / 2;
+            
+            nrem_duration = (cycleStageDurations.N2 + cycleStageDurations.N3) / 2;
+            
+            if nrem_duration > 0
+                spindle_density = nrem_spindles / nrem_duration;
+                fast_density = nrem_fast / nrem_duration;
+                slow_density = nrem_slow / nrem_duration;
+                SO_density = nrem_SO / nrem_duration;
+            else
+                spindle_density = 0;
+                fast_density = 0;
+                slow_density = 0;
+                SO_density = 0;
+            end
+            
+            data{end+1, 1} = cycleNum;
+            data{end, 2} = 'Central Average';
+            data{end, 3} = 'Central';
+            data{end, 4} = 'NREM';
+            data{end, 5} = nrem_spindles;
+            data{end, 6} = nrem_fast;
+            data{end, 7} = nrem_slow;
+            data{end, 8} = nrem_SO;
+            data{end, 9} = nrem_duration;
+            data{end, 10} = spindle_density;
+            data{end, 11} = fast_density;
+            data{end, 12} = slow_density;
+            data{end, 13} = SO_density;
+            data{end, 14} = nrem_freq;
+            data{end, 15} = nrem_dur;
+            data{end, 16} = nrem_amp;
+            data{end, 17} = cycleDuration;
+        end
+        
+        % Add Overall Average for N2 (average of Frontal and Central)
+        if ~isempty(frontal_N2_data.spindles) && ~isempty(central_N2_data.spindles)
+            frontal_N2_avg = mean(frontal_N2_data.spindles);
+            central_N2_avg = mean(central_N2_data.spindles);
+            frontal_fast_avg = mean(frontal_N2_data.fast);
+            central_fast_avg = mean(central_N2_data.fast);
+            frontal_slow_avg = mean(frontal_N2_data.slow);
+            central_slow_avg = mean(central_N2_data.slow);
+            frontal_SO_avg = mean(frontal_N2_data.SO_count);
+            central_SO_avg = mean(central_N2_data.SO_count);
+            
+            % Calculate weighted means for each region
+            frontal_total = sum(frontal_N2_data.spindles);
+            central_total = sum(central_N2_data.spindles);
+            
+            if frontal_total > 0
+                frontal_freq = sum(frontal_N2_data.freq) / frontal_total;
+                frontal_dur = sum(frontal_N2_data.dur) / frontal_total;
+                frontal_amp = sum(frontal_N2_data.amp) / frontal_total;
+            else
+                frontal_freq = 0;
+                frontal_dur = 0;
+                frontal_amp = 0;
+            end
+            
+            if central_total > 0
+                central_freq = sum(central_N2_data.freq) / central_total;
+                central_dur = sum(central_N2_data.dur) / central_total;
+                central_amp = sum(central_N2_data.amp) / central_total;
+            else
+                central_freq = 0;
+                central_dur = 0;
+                central_amp = 0;
+            end
+            
+            overall_spindles = round((frontal_N2_avg + central_N2_avg) / 2);
+            overall_fast = round((frontal_fast_avg + central_fast_avg) / 2);
+            overall_slow = round((frontal_slow_avg + central_slow_avg) / 2);
+            overall_SO = round((frontal_SO_avg + central_SO_avg) / 2);
+            overall_freq = (frontal_freq + central_freq) / 2;
+            overall_dur = (frontal_dur + central_dur) / 2;
+            overall_amp = (frontal_amp + central_amp) / 2;
+            
+            stage_duration = cycleStageDurations.N2;
+            
+            if stage_duration > 0
+                spindle_density = overall_spindles / stage_duration;
+                fast_density = overall_fast / stage_duration;
+                slow_density = overall_slow / stage_duration;
+                SO_density = overall_SO / stage_duration;
+            else
+                spindle_density = 0;
+                fast_density = 0;
+                slow_density = 0;
+                SO_density = 0;
+            end
+            
+            data{end+1, 1} = cycleNum;
+            data{end, 2} = 'Overall Average';
+            data{end, 3} = 'Overall';
+            data{end, 4} = 'N2';
+            data{end, 5} = overall_spindles;
+            data{end, 6} = overall_fast;
+            data{end, 7} = overall_slow;
+            data{end, 8} = overall_SO;
+            data{end, 9} = stage_duration;
+            data{end, 10} = spindle_density;
+            data{end, 11} = fast_density;
+            data{end, 12} = slow_density;
+            data{end, 13} = SO_density;
+            data{end, 14} = overall_freq;
+            data{end, 15} = overall_dur;
+            data{end, 16} = overall_amp;
+            data{end, 17} = cycleDuration;
+        end
+        
+        % Add Overall Average for NREM (average of Frontal and Central NREM)
+        if (~isempty(frontal_N2_data.spindles) || ~isempty(frontal_N3_data.spindles)) && ...
+           (~isempty(central_N2_data.spindles) || ~isempty(central_N3_data.spindles))
+            
+            % Calculate frontal NREM average
+            frontal_nrem_spindles = 0;
+            frontal_nrem_fast = 0;
+            frontal_nrem_slow = 0;
+            frontal_nrem_SO = 0;
+            frontal_nrem_freq = 0;
+            frontal_nrem_dur = 0;
+            frontal_nrem_amp = 0;
+            frontal_count = 0;
+            
+            % Calculate frontal N2 component
+            if ~isempty(frontal_N2_data.spindles)
+                frontal_N2_avg = mean(frontal_N2_data.spindles);
+                frontal_N2_fast_avg = mean(frontal_N2_data.fast);
+                frontal_N2_slow_avg = mean(frontal_N2_data.slow);
+                frontal_N2_SO_avg = mean(frontal_N2_data.SO_count);
+                frontal_N2_total = sum(frontal_N2_data.spindles);
+                if frontal_N2_total > 0
+                    frontal_N2_freq = sum(frontal_N2_data.freq) / frontal_N2_total;
+                    frontal_N2_dur = sum(frontal_N2_data.dur) / frontal_N2_total;
+                    frontal_N2_amp = sum(frontal_N2_data.amp) / frontal_N2_total;
+                else
+                    frontal_N2_freq = 0;
+                    frontal_N2_dur = 0;
+                    frontal_N2_amp = 0;
+                end
+                frontal_nrem_spindles = frontal_nrem_spindles + frontal_N2_avg;
+                frontal_nrem_fast = frontal_nrem_fast + frontal_N2_fast_avg;
+                frontal_nrem_slow = frontal_nrem_slow + frontal_N2_slow_avg;
+                frontal_nrem_SO = frontal_nrem_SO + frontal_N2_SO_avg;
+                frontal_nrem_freq = frontal_nrem_freq + frontal_N2_freq;
+                frontal_nrem_dur = frontal_nrem_dur + frontal_N2_dur;
+                frontal_nrem_amp = frontal_nrem_amp + frontal_N2_amp;
+                frontal_count = frontal_count + 1;
+            end
+            
+            % Calculate frontal N3 component
+            if ~isempty(frontal_N3_data.spindles)
+                frontal_N3_avg = mean(frontal_N3_data.spindles);
+                frontal_N3_fast_avg = mean(frontal_N3_data.fast);
+                frontal_N3_slow_avg = mean(frontal_N3_data.slow);
+                frontal_N3_SO_avg = mean(frontal_N3_data.SO_count);
+                frontal_N3_total = sum(frontal_N3_data.spindles);
+                if frontal_N3_total > 0
+                    frontal_N3_freq = sum(frontal_N3_data.freq) / frontal_N3_total;
+                    frontal_N3_dur = sum(frontal_N3_data.dur) / frontal_N3_total;
+                    frontal_N3_amp = sum(frontal_N3_data.amp) / frontal_N3_total;
+                else
+                    frontal_N3_freq = 0;
+                    frontal_N3_dur = 0;
+                    frontal_N3_amp = 0;
+                end
+                frontal_nrem_spindles = frontal_nrem_spindles + frontal_N3_avg;
+                frontal_nrem_fast = frontal_nrem_fast + frontal_N3_fast_avg;
+                frontal_nrem_slow = frontal_nrem_slow + frontal_N3_slow_avg;
+                frontal_nrem_SO = frontal_nrem_SO + frontal_N3_SO_avg;
+                frontal_nrem_freq = frontal_nrem_freq + frontal_N3_freq;
+                frontal_nrem_dur = frontal_nrem_dur + frontal_N3_dur;
+                frontal_nrem_amp = frontal_nrem_amp + frontal_N3_amp;
+                frontal_count = frontal_count + 1;
+            end
+            
+            % Average frontal N2 and N3
+            if frontal_count > 0
+                frontal_nrem_spindles = round(frontal_nrem_spindles / frontal_count);
+                frontal_nrem_fast = round(frontal_nrem_fast / frontal_count);
+                frontal_nrem_slow = round(frontal_nrem_slow / frontal_count);
+                frontal_nrem_SO = round(frontal_nrem_SO / frontal_count);
+                frontal_nrem_freq = frontal_nrem_freq / frontal_count;
+                frontal_nrem_dur = frontal_nrem_dur / frontal_count;
+                frontal_nrem_amp = frontal_nrem_amp / frontal_count;
+            end
+            
+            % Calculate central NREM average (same logic as frontal)
+            central_nrem_spindles = 0;
+            central_nrem_fast = 0;
+            central_nrem_slow = 0;
+            central_nrem_SO = 0;
+            central_nrem_freq = 0;
+            central_nrem_dur = 0;
+            central_nrem_amp = 0;
+            central_count = 0;
+            
+            % Calculate central N2 component
+            if ~isempty(central_N2_data.spindles)
+                central_N2_avg = mean(central_N2_data.spindles);
+                central_N2_fast_avg = mean(central_N2_data.fast);
+                central_N2_slow_avg = mean(central_N2_data.slow);
+                central_N2_SO_avg = mean(central_N2_data.SO_count);
+                central_N2_total = sum(central_N2_data.spindles);
+                if central_N2_total > 0
+                    central_N2_freq = sum(central_N2_data.freq) / central_N2_total;
+                    central_N2_dur = sum(central_N2_data.dur) / central_N2_total;
+                    central_N2_amp = sum(central_N2_data.amp) / central_N2_total;
+                else
+                    central_N2_freq = 0;
+                    central_N2_dur = 0;
+                    central_N2_amp = 0;
+                end
+                central_nrem_spindles = central_nrem_spindles + central_N2_avg;
+                central_nrem_fast = central_nrem_fast + central_N2_fast_avg;
+                central_nrem_slow = central_nrem_slow + central_N2_slow_avg;
+                central_nrem_SO = central_nrem_SO + central_N2_SO_avg;
+                central_nrem_freq = central_nrem_freq + central_N2_freq;
+                central_nrem_dur = central_nrem_dur + central_N2_dur;
+                central_nrem_amp = central_nrem_amp + central_N2_amp;
+                central_count = central_count + 1;
+            end
+            
+            % Calculate central N3 component
+            if ~isempty(central_N3_data.spindles)
+                central_N3_avg = mean(central_N3_data.spindles);
+                central_N3_fast_avg = mean(central_N3_data.fast);
+                central_N3_slow_avg = mean(central_N3_data.slow);
+                central_N3_SO_avg = mean(central_N3_data.SO_count);
+                central_N3_total = sum(central_N3_data.spindles);
+                if central_N3_total > 0
+                    central_N3_freq = sum(central_N3_data.freq) / central_N3_total;
+                    central_N3_dur = sum(central_N3_data.dur) / central_N3_total;
+                    central_N3_amp = sum(central_N3_data.amp) / central_N3_total;
+                else
+                    central_N3_freq = 0;
+                    central_N3_dur = 0;
+                    central_N3_amp = 0;
+                end
+                central_nrem_spindles = central_nrem_spindles + central_N3_avg;
+                central_nrem_fast = central_nrem_fast + central_N3_fast_avg;
+                central_nrem_slow = central_nrem_slow + central_N3_slow_avg;
+                central_nrem_SO = central_nrem_SO + central_N3_SO_avg;
+                central_nrem_freq = central_nrem_freq + central_N3_freq;
+                central_nrem_dur = central_nrem_dur + central_N3_dur;
+                central_nrem_amp = central_nrem_amp + central_N3_amp;
+                central_count = central_count + 1;
+            end
+            
+            % Average central N2 and N3
+            if central_count > 0
+                central_nrem_spindles = round(central_nrem_spindles / central_count);
+                central_nrem_fast = round(central_nrem_fast / central_count);
+                central_nrem_slow = round(central_nrem_slow / central_count);
+                central_nrem_SO = round(central_nrem_SO / central_count);
+                central_nrem_freq = central_nrem_freq / central_count;
+                central_nrem_dur = central_nrem_dur / central_count;
+                central_nrem_amp = central_nrem_amp / central_count;
+            end
+            
+            % Calculate overall average (average of frontal and central NREM)
+            overall_spindles = round((frontal_nrem_spindles + central_nrem_spindles) / 2);
+            overall_fast = round((frontal_nrem_fast + central_nrem_fast) / 2);
+            overall_slow = round((frontal_nrem_slow + central_nrem_slow) / 2);
+            overall_SO = round((frontal_nrem_SO + central_nrem_SO) / 2);
+            overall_freq = (frontal_nrem_freq + central_nrem_freq) / 2;
+            overall_dur = (frontal_nrem_dur + central_nrem_dur) / 2;
+            overall_amp = (frontal_nrem_amp + central_nrem_amp) / 2;
+            
+            nrem_duration = (cycleStageDurations.N2 + cycleStageDurations.N3) / 2;
+            
+            if nrem_duration > 0
+                spindle_density = overall_spindles / nrem_duration;
+                fast_density = overall_fast / nrem_duration;
+                slow_density = overall_slow / nrem_duration;
+                SO_density = overall_SO / nrem_duration;
+            else
+                spindle_density = 0;
+                fast_density = 0;
+                slow_density = 0;
+                SO_density = 0;
+            end
+            
+            data{end+1, 1} = cycleNum;
+            data{end, 2} = 'Overall Average';
+            data{end, 3} = 'Overall';
+            data{end, 4} = 'NREM';
+            data{end, 5} = overall_spindles;
+            data{end, 6} = overall_fast;
+            data{end, 7} = overall_slow;
+            data{end, 8} = overall_SO;
+            data{end, 9} = nrem_duration;
+            data{end, 10} = spindle_density;
+            data{end, 11} = fast_density;
+            data{end, 12} = slow_density;
+            data{end, 13} = SO_density;
+            data{end, 14} = overall_freq;
+            data{end, 15} = overall_dur;
+            data{end, 16} = overall_amp;
+            data{end, 17} = cycleDuration;
         end
     end
     
@@ -711,14 +1339,35 @@ function performCycleStatistics(obj)
         obj.cycleStatsTable = table();
     else
         obj.cycleStatsTable = cell2table(data, 'VariableNames', {
-            'Cycle', 'Channel', 'Stage', 'Spindle_Count', 'Fast_Count', 'Slow_Count', ...
-            'Stage_Duration_min', 'Spindle_Density_perMin', 'Fast_Density_perMin', ...
-            'Slow_Density_perMin', 'Mean_Frequency_Hz', 'Mean_Duration_s', 'Mean_Amplitude', ...
-            'Cycle_Duration_min'
+            'Cycle', 'Channel', 'Region', 'Stage', 'Spindle_Count', 'Fast_Count', 'Slow_Count', ...
+            'SO_Count', 'Stage_Duration_min', 'Spindle_Density_perMin', 'Fast_Density_perMin', ...
+            'Slow_Density_perMin', 'SO_Density_perMin', 'Mean_Frequency_Hz', 'Mean_Duration_s', ...
+            'Mean_Amplitude', 'Cycle_Duration_min'
             });
     end
     
-    fprintf('Cycle statistics completed: %d channel-cycle-stage rows\n', size(data, 1));
+    fprintf('Cycle statistics completed: %d rows (channels + regional averages)\n', size(data, 1));
+end
+
+% Add this helper method to count SOs in channel-cycle-stage
+function SO_count = countSOsInChannelCycleStage(obj, channelIdx, cycleEpochs, stageNum)
+    % Count SOs for a specific channel, cycle, and stage
+    SO_count = 0;
+    
+    if isempty(obj.SO_events)
+        return;
+    end
+    
+    for i = 1:size(obj.SO_events, 1)
+        if obj.SO_events(i,4) == channelIdx  % Check channel index
+            epochNumber = ceil(obj.SO_events(i,1) / 30);
+            if ismember(epochNumber, cycleEpochs) && ...
+               epochNumber <= length(obj.numericHypnogram) && ...
+               obj.numericHypnogram(epochNumber) == stageNum
+                SO_count = SO_count + 1;
+            end
+        end
+    end
 end
 
 function stageDurations = calculateStageDurations(obj)
@@ -2986,10 +3635,10 @@ end
 end
 
 function cycleStatsTable = buildCycleStatsTable(obj)
-    % Build enhanced cycle statistics table with channel-stage breakdown AND totals
-    fprintf('Building enhanced cycle statistics table with totals...\n');
+    % Build enhanced cycle statistics table with channel-stage breakdown AND regional averages
+    fprintf('Building enhanced cycle statistics table with regional averages...\n');
 
-    % Use the pre-computed table that already includes channel-stage breakdown + totals
+    % Use the pre-computed table that already includes channel-stage breakdown + regional averages
     if isempty(obj.cycleStatsTable) || height(obj.cycleStatsTable) == 0
         % Fallback: create basic table if the enhanced one isn't available
         if isempty(obj.cycleStats)
@@ -3027,7 +3676,7 @@ function cycleStatsTable = buildCycleStatsTable(obj)
                 });
         end
     else
-        % Use the enhanced table with channel-stage breakdown and totals
+        % Use the enhanced table with channel-stage breakdown and regional averages
         cycleStatsTable = obj.cycleStatsTable;
     end
     
@@ -3070,32 +3719,55 @@ end
         end
 
         function qualityTable = buildQualityTable(obj)
-            % Build data quality summary table
-            fprintf('Building quality table...\n');
+    % Build data quality summary table with methodology notes
+    fprintf('Building quality table with methodology notes...\n');
 
-            totalNREMTime = obj.calculateNREMTime();
-            
-            qualityData = {
-                'Total_SPT_Time_min', obj.sptDuration / 60;
-                'Total_NREM_Time_min', totalNREMTime;
-                'Artifact_Free_Percent', obj.getFieldSafe(obj.cleaningSummary, 'cleanDataPercentage', 0);
-                'Artifact_Percent', obj.getFieldSafe(obj.cleaningSummary, 'artifactPercentage', 0);
-                'ECG_Decontamination_Applied', obj.getFieldSafe(obj.cleaningSummary, 'ecgDecontaminationApplied', false);
-                'Total_Artifacts', obj.getFieldSafe(obj.cleaningSummary, 'totalArtifacts', 0);
-                'Total_Spindles', size(obj.spindleEvents, 1);
-                'Total_Fast_Spindles', size(obj.fastSpindleEvents, 1);
-                'Total_Slow_Spindles', size(obj.slowSpindleEvents, 1);
-                'Total_SO', size(obj.SO_events, 1);
-                'Spindle_Density', size(obj.spindleEvents, 1) / max(totalNREMTime, 0.1);
-                'Fast_Spindle_Density', size(obj.fastSpindleEvents, 1) / max(totalNREMTime, 0.1);
-                'Slow_Spindle_Density', size(obj.slowSpindleEvents, 1) / max(totalNREMTime, 0.1);
-                'SO_Density', size(obj.SO_events, 1) / max(totalNREMTime, 0.1);
-                'Mean_Spindle_Frequency_Hz', obj.fusionMetrics.mean_frequency;
-                'Mean_Spindle_Duration_s', obj.fusionMetrics.mean_duration;
-                };
+    totalNREMTime = obj.calculateNREMTime();
+    
+    % Main data metrics
+    qualityData = {
+        'Total_SPT_Time_min', obj.sptDuration / 60;
+        'Total_NREM_Time_min', totalNREMTime;
+        'Artifact_Free_Percent', obj.getFieldSafe(obj.cleaningSummary, 'cleanDataPercentage', 0);
+        'Artifact_Percent', obj.getFieldSafe(obj.cleaningSummary, 'artifactPercentage', 0);
+        'ECG_Decontamination_Applied', obj.getFieldSafe(obj.cleaningSummary, 'ecgDecontaminationApplied', false);
+        'Total_Artifacts', obj.getFieldSafe(obj.cleaningSummary, 'totalArtifacts', 0);
+        'Total_Spindles', size(obj.spindleEvents, 1);
+        'Total_Fast_Spindles', size(obj.fastSpindleEvents, 1);
+        'Total_Slow_Spindles', size(obj.slowSpindleEvents, 1);
+        'Total_SO', size(obj.SO_events, 1);
+        'Spindle_Density', size(obj.spindleEvents, 1) / max(totalNREMTime, 0.1);
+        'Fast_Spindle_Density', size(obj.fastSpindleEvents, 1) / max(totalNREMTime, 0.1);
+        'Slow_Spindle_Density', size(obj.slowSpindleEvents, 1) / max(totalNREMTime, 0.1);
+        'SO_Density', size(obj.SO_events, 1) / max(totalNREMTime, 0.1);
+        'Mean_Spindle_Frequency_Hz', obj.fusionMetrics.mean_frequency;
+        'Mean_Spindle_Duration_s', obj.fusionMetrics.mean_duration;
+        '',''; % Empty row separator
+        '=== METHODOLOGY NOTES ===','';
+        'Spindle_Definition','Fast: 13-16 Hz, Slow: 11-13 Hz';
+        'NREM_Definition','Combined N2 and N3 sleep stages';
+        'SO_Detection','Frontal channels only (F3-M2, F4-M1, Fz) in NREM sleep';
+        'SPT_Usage','Analysis performed only on Sleep Period Time (first to last sleep epoch)';
+        'Channel_Averages','Regional averages calculated as MEAN across channels (not sum)';
+        'Spindle_Detection','Hierarchical fusion of Morlet wavelet and RMS methods';
+        'SO_Spindle_Coupling','Temporal analysis within ±1s window';
+        'Artifact_Rejection','Multi-stage cleaning: ECG decontamination + amplitude/EMG rejection';
+        'Sleep_Cycles','Detected using sleep_cycles.m algorithm on NREM periods';
+        'Regional_Averages','Frontal: F3-M2, F4-M1, Fz; Central: C3-M2, C4-M1, Cz';
+        'Density_Calculation','Events per minute of NREM sleep (N2+N3)';
+        'Consensus_Spindles','Require detection by both wavelet and RMS methods or k-means clustering';
+        'Fusion_Metrics','Report AVERAGE spindles per channel across analyzed EEG channels';
+        'Stage_Durations','Calculated from hypnogram within SPT only';
+        'Quality_Thresholds','Spindles: 0.5-3.0s duration, 11-16Hz frequency, amplitude >15μV';
+        'SO_Criteria','Duration: 0.9-2.0s, amplitude >70μV peak-to-peak, frontal channels only';
+        'Wavelet_Parameters','Complex Morlet wavelet: center=13.5Hz, 7 cycles';
+        'RMS_Parameters','Window=0.25s, threshold=0.95×mean';
+        'Temporal_Relations','Early: <-1s, Late: >1s, Tight: ±1s from SO peak';
+        'K_means_Clustering','3-5 clusters, spindle-like characteristics score >0.6';
+        };
 
-            qualityTable = cell2table(qualityData, 'VariableNames', {'Parameter', 'Value'});
-        end
+    qualityTable = cell2table(qualityData, 'VariableNames', {'Parameter', 'Value'});
+end
 
         function writeConsolidatedResultsToExcel(obj, outputFile, fusionTable, methodTable, channelStatsTable, ...
                 stageStatsTable, cycleStatsTable, temporalRelationsTable, qualityTable)
